@@ -1,0 +1,21 @@
+[Unit]
+Description=VK TURN Proxy Telegram Monitor
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/vk-turn-bot
+ExecStart=/usr/bin/node /opt/vk-turn-bot/dist/index.js
+Restart=always
+RestartSec=10
+EnvironmentFile=/opt/vk-turn-bot/.env
+
+# Лимиты безопасности
+NoNewPrivileges=false
+ProtectSystem=false
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
