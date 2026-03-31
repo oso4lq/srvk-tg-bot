@@ -99,7 +99,7 @@ async function checkTurnHealth(): Promise<{
 
     // Проверка 2: есть ли активные UDP-соединения на порту?
     const { stdout: connections } = await execAsync(
-      `ss -unp | grep ":${config.turnListenPort}" | wc -l`
+      `ss -unlp | grep ":${config.turnListenPort}" | wc -l`
     );
 
     const connCount = parseInt(connections.trim(), 10);
