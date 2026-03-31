@@ -2,61 +2,159 @@
 
 Telegram-бот для мониторинга и управления vk-turn-proxy на VPS.
 
-## Возможности
+## Что делает
 
-- Проверка здоровья TURN-соединения каждые 5 минут
-- Алерт в Telegram, если TURN перестал отвечать
-- Обновление ссылки на VK-звонок через бота
-- Перезапуск vk-turn-proxy через бота
-- Статистика: аптайм, количество перезапусков
+- Проверяет здоровье TURN-соединения каждые 5 минут
+- Отправляет алерт в Telegram, если TURN перестал отвечать
+- Позволяет обновить ссылку на VK-звонок через бота
+- Перезапускает vk-turn-proxy через бота
+- Показывает статистику: аптайм, количество перезапусков
 
-## Установка на VPS
+## Требования
 
-### 1. Создать бота в Telegram
+- VPS с Debian 12 (или другой Linux)
+- Node.js 20+
+- Установленные на VPS: WireGuard, vk-turn-proxy server, vk-turn-proxy client
+- Telegram-аккаунт
 
-Написать @BotFather, отправить `/newbot`, получить токен.
+## Установка с нуля
 
-### 2. Узнать свой chat ID
-
-Написать @userinfobot, он покажет ID.
-
-### 3. Установить бота на VPS
+### 1. Установить Node.js (если нет)
 
 ```bash
-# Клонируем/копируем проект
-cp -r vk-turn-bot /opt/vk-turn-bot
-cd /opt/vk-turn-bot
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+apt install -y nodejs
+node -v && npm -v
+```
 
-# Устанавливаем зависимости и собираем
+### 2. Установить git (если нет)
+
+```bash
+apt install -y git
+```
+
+### 3. Клонировать репозиторий
+
+```bash
+cd /opt
+git clone https://github.com/oso4lq/srvk-tg-bot.git vk-turn-bot
+cd /opt/vk-turn-bot
+```
+
+### 4. Установить зависимости и собрать
+
+```bash
 npm install
 npm run build
+```
 
-# Создаём конфиг
+Успешная сборка — `tsc` без ошибок, появляется папка `dist/`.
+
+### 5. Создать Telegram-бота
+
+1. Открыть Telegram, найти [@BotFather](https://t.me/BotFather)
+2. Отправить `/newbot`
+3. Ввести имя бота (например, `VK TURN Monitor`)
+4. Ввести username бота (например, `vk_turn_monitor_bot`)
+5. Скопировать токен — строка вида `8210090927:AAH...`
+
+### 6. Узнать свой chat ID
+
+1. Открыть Telegram, найти [@userinfobot](https://t.me/userinfobot)
+2. Отправить ему любое сообщение
+3. Скопировать число из поля `Id` — например, `123456789`
+
+### 7. Создать конфиг
+
+```bash
+cd /opt/vk-turn-bot
 cp .env.example .env
-nano .env  # Заполняем BOT_TOKEN и ADMIN_CHAT_ID
+nano .env
+```
 
-# Создаём директорию для конфига vk-turn-proxy
+Заполнить обязательные поля:
+
+```env
+# Токен от @BotFather (шаг 5)
+BOT_TOKEN=8210090927:AAH...
+
+# Твой chat ID от @userinfobot (шаг 6)
+ADMIN_CHAT_ID=123456789
+```
+
+Остальные поля можно оставить по умолчанию:
+
+```env
+# Путь к бинарнику vk-turn-proxy клиента на VPS
+VK_TURN_CLIENT_PATH=/usr/local/bin/vk-turn-client
+
+# Путь к конфиг-файлу
+CONFIG_PATH=/etc/vk-turn-proxy/config.json
+
+# Имя systemd-сервиса vk-turn-proxy
+SYSTEMD_SERVICE=vk-turn-proxy
+
+# WireGuard на этом же VPS
+WG_PEER_IP=127.0.0.1
+WG_PEER_PORT=51820
+
+# Порт vk-turn-proxy сервера
+VK_TURN_LISTEN_PORT=56000
+
+# Интервал проверки TURN (в минутах)
+CHECK_INTERVAL_MIN=5
+```
+
+### 8. Создать директории
+
+```bash
 mkdir -p /etc/vk-turn-proxy
 mkdir -p /etc/systemd/system/vk-turn-proxy.service.d
 ```
 
-### 4. Настроить systemd
+- `/etc/vk-turn-proxy/` — здесь бот хранит `config.json` с текущей ссылкой и статистикой
+- `/etc/systemd/system/vk-turn-proxy.service.d/` — здесь бот создаёт override при `/restart`
+
+### 9. Установить systemd-сервис
 
 ```bash
-# Копируем сервис
-cp vk-turn-bot.service /etc/systemd/system/
-
-# Запускаем
+cp /opt/vk-turn-bot/vk-turn-bot.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable vk-turn-bot
 systemctl start vk-turn-bot
-
-# Проверяем
-systemctl status vk-turn-bot
-journalctl -u vk-turn-bot -f
 ```
 
-### 5. Первоначальная настройка через Telegram
+### 10. Проверить
+
+```bash
+systemctl status vk-turn-bot
+```
+
+Ожидаемый результат:
+
+```
+● vk-turn-bot.service - VK TURN Proxy Telegram Monitor
+     Active: active (running)
+```
+
+В Telegram должно прийти сообщение: `🟢 VK TURN Monitor запущен`
+
+## Команды бота
+
+| Команда | Описание |
+|---------|----------|
+| `/start` | Список доступных команд |
+| `/status` | Проверить, жив ли TURN (сервис + UDP-сокет) |
+| `/setlink <url>` | Установить новую ссылку VK-звонка |
+| `/restart` | Перезапустить vk-turn-proxy сервис |
+| `/stats` | Аптайм, перезапуски, последняя проверка |
+| `/config` | Текущие параметры (ссылка замаскирована) |
+
+Также можно просто отправить ссылку `https://vk.com/call/join/...` — бот предложит применить.
+
+## Первоначальная настройка через Telegram
+
+После запуска бота:
 
 ```
 /setlink https://vk.com/call/join/ваша_ссылка
@@ -64,18 +162,98 @@ journalctl -u vk-turn-bot -f
 /status
 ```
 
-## Команды бота
-
-| Команда | Описание |
-|---------|----------|
-| `/status` | Проверить, жив ли TURN |
-| `/setlink <url>` | Установить новую ссылку VK-звонка |
-| `/restart` | Перезапустить vk-turn-proxy |
-| `/stats` | Статистика: аптайм, перезапуски |
-| `/config` | Текущая конфигурация |
-
 ## Безопасность
 
-Бот отвечает **только** на сообщения от ADMIN_CHAT_ID.
-Все остальные сообщения молча игнорируются.
-Ссылка VK-звонка хранится в `/etc/vk-turn-proxy/config.json`.
+- Бот отвечает **только** на сообщения от `ADMIN_CHAT_ID`
+- Все остальные сообщения молча игнорируются
+- Ссылка VK-звонка хранится в `/etc/vk-turn-proxy/config.json`
+- Токен бота хранится в `/opt/vk-turn-bot/.env`, не в коде
+
+## Фоновый мониторинг
+
+Бот автоматически проверяет здоровье TURN каждые `CHECK_INTERVAL_MIN` минут (по умолчанию 5). Первая проверка — через 30 секунд после старта.
+
+Если TURN не отвечает — бот присылает алерт:
+
+```
+🚨 TURN не отвечает!
+<описание проблемы>
+Отправь новую ссылку VK-звонка или выполни /restart
+```
+
+## Обновление бота
+
+```bash
+cd /opt/vk-turn-bot
+git pull
+npm install
+npm run build
+systemctl restart vk-turn-bot
+```
+
+## Логи
+
+```bash
+# Последние логи
+journalctl -u vk-turn-bot --no-pager -n 50
+
+# Следить в реальном времени
+journalctl -u vk-turn-bot -f
+```
+
+## Связанные сервисы на VPS
+
+Бот работает в связке с другими компонентами:
+
+| Сервис | Команда проверки | Порт |
+|--------|------------------|------|
+| WireGuard | `systemctl status wg-quick@wg0` | 51820/UDP (localhost) |
+| vk-turn-proxy server | `systemctl status vk-turn-proxy` | 56000/UDP |
+| XRAY (3X-UI) | `systemctl status x-ui` | 443/TCP |
+| Telegram-бот | `systemctl status vk-turn-bot` | — |
+
+## Устранение проблем
+
+### Бот не запускается
+
+```bash
+journalctl -u vk-turn-bot --no-pager -n 20
+```
+
+Частые причины:
+- Не заполнен `BOT_TOKEN` в `.env`
+- Неверный токен бота
+- Node.js не установлен
+
+### Бот не отвечает в Telegram
+
+- Проверить `ADMIN_CHAT_ID` в `.env` — должен совпадать с твоим ID
+- Бот отвечает только тебе, остальных игнорирует
+
+### /status показывает «мёртв»
+
+1. Проверить, запущен ли vk-turn-proxy: `systemctl status vk-turn-proxy`
+2. Проверить, слушает ли порт: `ss -unlp | grep ":56000"`
+3. Если сервис не запущен: `systemctl start vk-turn-proxy`
+
+### /restart выдаёт ошибку
+
+- Убедиться, что ссылка задана: `/config`
+- Проверить права: бот должен работать от root (указано в service-файле)
+- Проверить директорию override: `ls /etc/systemd/system/vk-turn-proxy.service.d/`
+
+## Структура проекта
+
+```
+/opt/vk-turn-bot/
+├── src/
+│   └── index.ts          # Исходный код бота
+├── dist/
+│   └── index.js          # Скомпилированный JS
+├── .env                  # Конфигурация (не в git)
+├── .env.example          # Шаблон конфигурации
+├── package.json
+├── tsconfig.json
+├── vk-turn-bot.service   # Systemd unit-файл
+└── README.md
+```
