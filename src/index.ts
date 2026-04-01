@@ -34,6 +34,8 @@ interface TurnConfig {
     periodStart: string;
     trafficSnapshotBytes: number;
   };
+  /** Мониторинг включён */
+  monitoringEnabled: boolean;
 }
 
 const BOT_TOKEN = process.env.BOT_TOKEN!;
@@ -70,6 +72,7 @@ function loadConfig(): TurnConfig {
         uptimeSince: new Date().toISOString(),
       },
       dailyStats: DEFAULT_DAILY_STATS(),
+      monitoringEnabled: true,
     };
     saveConfig(defaultConfig);
     return defaultConfig;
@@ -78,6 +81,7 @@ function loadConfig(): TurnConfig {
   // Backwards compat
   if (!raw.dailyStats) raw.dailyStats = DEFAULT_DAILY_STATS();
   if (!raw.stats.lastCheckDetails) raw.stats.lastCheckDetails = "";
+  if (raw.monitoringEnabled === undefined) raw.monitoringEnabled = true;
   return raw as TurnConfig;
 }
 
@@ -315,7 +319,8 @@ const bot = new Bot(BOT_TOKEN);
 
 const mainKeyboard = new Keyboard()
   .text("Статус").text("Статистика").row()
-  .text("Перезапуск").text("Конфиг")
+  .text("Перезапуск").text("Конфиг").row()
+  .text("Мониторинг")
   .resized()
   .persistent();
 
@@ -337,7 +342,8 @@ bot.command("start", async (ctx) => {
       "/status — проверка здоровья TURN\n" +
       "/stats — статистика\n" +
       "/restart — перезапустить vk-turn-proxy\n" +
-      "/config — текущая конфигурация",
+      "/config — текущая конфигурация\n" +
+      "/monitor — вкл/выкл мониторинг",
     { reply_markup: mainKeyboard }
   );
 });
@@ -483,6 +489,18 @@ async function handleConfig(ctx: Context): Promise<void> {
 bot.command("config", handleConfig);
 bot.hears("Конфиг", handleConfig);
 
+// /monitor — включение/отключение мониторинга
+async function handleMonitor(ctx: Context): Promise<void> {
+  const config = loadConfig();
+  config.monitoringEnabled = !config.monitoringEnabled;
+  saveConfig(config);
+
+  const state = config.monitoringEnabled ? "включён ✅" : "выключен ⏸";
+  await ctx.reply(`Мониторинг ${state}`);
+}
+bot.command("monitor", handleMonitor);
+bot.hears("Мониторинг", handleMonitor);
+
 // Обработка простых сообщений — автоматически применяем ссылку VK
 bot.on("message:text", async (ctx) => {
   const text = ctx.message.text.trim();
@@ -529,8 +547,8 @@ let monitorInterval: ReturnType<typeof setInterval>;
 async function runHealthCheck(): Promise<void> {
   const config = loadConfig();
 
-  // Не проверяем, если ссылка не задана
-  if (!config.vkCallLink) return;
+  // Не проверяем, если мониторинг выключен или ссылка не задана
+  if (!config.monitoringEnabled || !config.vkCallLink) return;
 
   const result = await checkTurnHealth();
 
