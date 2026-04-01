@@ -718,6 +718,59 @@ async function handleMonitor(ctx: Context): Promise<void> {
 bot.command("monitor", handleMonitor);
 bot.hears("Мониторинг", handleMonitor);
 
+// /links — просмотр очереди резервных ссылок
+bot.command("links", async (ctx) => {
+  const config = loadConfig();
+
+  const lines: string[] = [];
+
+  if (config.vkCallLink) {
+    lines.push(`🔗 Активная: ${config.vkCallLink}`);
+  } else {
+    lines.push("🔗 Активная ссылка не задана");
+  }
+
+  if (config.linkQueue.length === 0) {
+    lines.push("\nОчередь пуста, резервных ссылок нет.");
+  } else {
+    lines.push(`\nОчередь (${config.linkQueue.length}):`);
+    config.linkQueue.forEach((link, i) => {
+      lines.push(`${i + 1}. ${link}`);
+    });
+  }
+
+  await ctx.reply(lines.join("\n"));
+});
+
+// /rmlink N — удаление ссылки из очереди по номеру
+bot.command("rmlink", async (ctx) => {
+  const arg = ctx.match?.trim();
+  const num = Number(arg);
+
+  if (!arg || isNaN(num) || !Number.isInteger(num)) {
+    await ctx.reply("Использование: /rmlink N (номер из /links)");
+    return;
+  }
+
+  const config = loadConfig();
+  const idx = num - 1;
+
+  if (idx < 0 || idx >= config.linkQueue.length) {
+    await ctx.reply(
+      `❌ Номер должен быть от 1 до ${config.linkQueue.length}.\n` +
+        `Используй /links для просмотра очереди.`
+    );
+    return;
+  }
+
+  const removed = config.linkQueue.splice(idx, 1)[0];
+  saveConfig(config);
+
+  await ctx.reply(
+    `✅ Ссылка #${num} удалена.\n${removed}\n\nОсталось в очереди: ${config.linkQueue.length}`
+  );
+});
+
 // Обработка текстовых сообщений — добавление в очередь
 bot.on("message:text", async (ctx) => {
   const text = ctx.message.text.trim();
