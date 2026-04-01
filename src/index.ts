@@ -49,8 +49,7 @@ const CHECK_INTERVAL_MS = (Number(process.env.CHECK_INTERVAL_MIN) || 5) * 60 * 1
 // VK API для публикации ссылки на стену закрытой группы
 const VK_GROUP_TOKEN = process.env.VK_GROUP_TOKEN || "";
 const VK_GROUP_ID = process.env.VK_GROUP_ID || "";
-const VK_POST_ID = process.env.VK_POST_ID || "";
-const isVkConfigured = !!(VK_GROUP_TOKEN && VK_GROUP_ID && VK_POST_ID);
+const isVkConfigured = !!(VK_GROUP_TOKEN && VK_GROUP_ID);
 
 let isApplying = false;
 
@@ -98,22 +97,22 @@ function saveConfig(config: TurnConfig): void {
 
 // ─── VK API ─────────────────────────────────────────────────
 
-/** Публикует ссылку в закреплённый пост закрытой VK-группы */
+/** Публикует ссылку новым постом на стене закрытой VK-группы */
 async function publishToVk(link: string): Promise<{ ok: boolean; error?: string }> {
   if (!isVkConfigured) {
-    return { ok: false, error: "VK relay не настроен" };
+    return { ok: false, error: "Публикация в VK не настроена" };
   }
 
   try {
     const params = new URLSearchParams({
       access_token: VK_GROUP_TOKEN,
       owner_id: `-${VK_GROUP_ID}`,
-      post_id: VK_POST_ID,
+      from_group: "1",
       message: link,
       v: "5.199",
     });
 
-    const res = await fetch("https://api.vk.com/method/wall.edit", {
+    const res = await fetch("https://api.vk.com/method/wall.post", {
       method: "POST",
       body: params,
     });
@@ -811,9 +810,9 @@ async function main(): Promise<void> {
 
   // Проверка VK relay конфигурации
   if (!isVkConfigured) {
-    const hasAny = VK_GROUP_TOKEN || VK_GROUP_ID || VK_POST_ID;
+    const hasAny = VK_GROUP_TOKEN || VK_GROUP_ID;
     if (hasAny) {
-      console.warn("VK relay частично настроен — нужны все три: VK_GROUP_TOKEN, VK_GROUP_ID, VK_POST_ID");
+      console.warn("VK relay частично настроен — нужны оба: VK_GROUP_TOKEN, VK_GROUP_ID");
     } else {
       console.log("VK relay не настроен — публикация ссылок в VK отключена");
     }
