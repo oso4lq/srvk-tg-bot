@@ -892,6 +892,17 @@ bot.on("message:text", async (ctx) => {
       `✅ Ссылка добавлена в очередь (позиция ${config.linkQueue.length}).\n` +
         `Всего ссылок в очереди: ${config.linkQueue.length}`
     );
+
+    // Если активная ссылка мертва — сразу пробуем fallback
+    if (config.vkCallLink && !isApplying) {
+      const health = await checkLinkHealth(config.vkCallLink, config, undefined, 2, 10_000);
+      if (!health.alive) {
+        await tryFallbackFromQueue();
+      }
+    } else if (!config.vkCallLink) {
+      // Нет активной ссылки — сразу активируем из очереди
+      await tryFallbackFromQueue();
+    }
     return;
   }
 
