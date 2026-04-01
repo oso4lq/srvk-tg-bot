@@ -1,0 +1,28 @@
+# ============================================
+# config.sh — конфигурация для fetch-link.sh
+# Файл: /etc/vk-tunnel/config.sh
+# ============================================
+
+# VK API — токен сообщества (тот же, что VK_GROUP_TOKEN в .env бота)
+VK_TOKEN="vk1.a.xxx..."
+
+# ID группы (без минуса)
+VK_GROUP_ID="123456789"
+
+# Версия VK API
+VK_API_VERSION="5.199"
+
+# Regex для извлечения ссылки из текста поста
+LINK_PATTERN="https://vk\.(com|ru)/call/join/[A-Za-z0-9_/+-]+"
+
+# Файл с текущей ссылкой (для сравнения)
+CURRENT_LINK_FILE="/etc/vk-tunnel/current-link.txt"
+
+# Лог-файл
+LOG_FILE="/tmp/vk-tunnel.log"
+
+# PID-файл vk-turn-client
+PID_FILE="/var/run/vk-turn-client.pid"
+
+# Путь к бинарнику vk-turn-client
+VK_TURN_CLIENT="/usr/bin/vk-turn-client"

@@ -43,9 +43,16 @@ const ADMIN_CHAT_ID = Number(process.env.ADMIN_CHAT_ID!);
 const CONFIG_PATH = process.env.CONFIG_PATH || "/etc/vk-turn-proxy/config.json";
 const SYSTEMD_SERVICE = process.env.SYSTEMD_SERVICE || "vk-turn-proxy";
 const VK_TURN_CLIENT_PATH = process.env.VK_TURN_CLIENT_PATH || "/usr/local/bin/vk-turn-client";
-const VK_TURN_SERVER_PATH = process.env.VK_TURN_SERVER_PATH || "/usr/local/bin/vk-turn-server";
 const VPS_PUBLIC_IP = process.env.VPS_PUBLIC_IP || "";
 const CHECK_INTERVAL_MS = (Number(process.env.CHECK_INTERVAL_MIN) || 5) * 60 * 1000;
+
+// VK API для публикации ссылки на стену закрытой группы
+const VK_GROUP_TOKEN = process.env.VK_GROUP_TOKEN || "";
+const VK_GROUP_ID = process.env.VK_GROUP_ID || "";
+const VK_POST_ID = process.env.VK_POST_ID || "";
+const isVkConfigured = !!(VK_GROUP_TOKEN && VK_GROUP_ID && VK_POST_ID);
+
+let isApplying = false;
 
 // ─── Работа с конфигом ──────────────────────────────────────
 
@@ -87,6 +94,186 @@ function loadConfig(): TurnConfig {
 
 function saveConfig(config: TurnConfig): void {
   writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
+}
+
+// ─── VK API ─────────────────────────────────────────────────
+
+/** Публикует ссылку в закреплённый пост закрытой VK-группы */
+async function publishToVk(link: string): Promise<{ ok: boolean; error?: string }> {
+  if (!isVkConfigured) {
+    return { ok: false, error: "VK relay не настроен" };
+  }
+
+  try {
+    const params = new URLSearchParams({
+      access_token: VK_GROUP_TOKEN,
+      owner_id: `-${VK_GROUP_ID}`,
+      post_id: VK_POST_ID,
+      message: link,
+      v: "5.199",
+    });
+
+    const res = await fetch("https://api.vk.com/method/wall.edit", {
+      method: "POST",
+      body: params,
+    });
+
+    const data = await res.json() as {
+      response?: { post_id: number };
+      error?: { error_code: number; error_msg: string };
+    };
+
+    if (data.error) {
+      const { error_code, error_msg } = data.error;
+      return { ok: false, error: `VK API ${error_code}: ${error_msg}` };
+    }
+
+    if (data.response?.post_id) {
+      return { ok: true };
+    }
+
+    return { ok: false, error: "VK API: неожиданный ответ" };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return { ok: false, error: `VK API: ${msg}` };
+  }
+}
+
+/** Проверяет валидность VK call link через TURN-клиент (до maxAttempts попыток) */
+async function checkLinkHealth(
+  link: string,
+  config: TurnConfig,
+  onAttempt?: (attempt: number) => void,
+  maxAttempts = 5,
+  intervalMs = 10_000,
+): Promise<{ alive: boolean; attempts: number; error?: string }> {
+  if (!existsSync(VK_TURN_CLIENT_PATH) || !VPS_PUBLIC_IP) {
+    const reason = !existsSync(VK_TURN_CLIENT_PATH) ? "нет клиента" : "не задан VPS_PUBLIC_IP";
+    return { alive: true, attempts: 0, error: `Ссылка не проверена — ${reason}` };
+  }
+
+  for (let i = 1; i <= maxAttempts; i++) {
+    if (onAttempt) onAttempt(i);
+
+    try {
+      await execAsync(
+        `timeout 15 ${VK_TURN_CLIENT_PATH} ` +
+          `-vk-link "${link}" ` +
+          `-peer ${config.wgPeerAddress}:${config.turnListenPort} ` +
+          `-listen 127.0.0.1:0 ` +
+          `-n 1 2>&1`,
+        { timeout: 20_000 }
+      );
+      return { alive: true, attempts: i };
+    } catch (error: any) {
+      if (error?.killed || error?.signal === "SIGTERM" || error?.code === 124) {
+        return { alive: true, attempts: i };
+      }
+
+      if (i < maxAttempts) {
+        await new Promise((r) => setTimeout(r, intervalMs));
+      } else {
+        const msg = error instanceof Error ? error.message : String(error);
+        return { alive: false, attempts: i, error: msg.slice(0, 200) };
+      }
+    }
+  }
+
+  return { alive: false, attempts: maxAttempts };
+}
+
+// ─── Применение ссылки ──────────────────────────────────────
+
+const VK_CALL_REGEX = /^https:\/\/vk\.(com|ru)\/call\/join\/[A-Za-z0-9_/-]+$/;
+
+/** Применяет ссылку: валидация → сохранение → VK → health check → отчёт */
+async function applyLink(link: string, ctx: Context): Promise<void> {
+  if (isApplying) {
+    await ctx.reply("⏳ Уже применяю ссылку, подожди.");
+    return;
+  }
+
+  if (!VK_CALL_REGEX.test(link)) {
+    await ctx.reply("❌ Неверный формат ссылки. Ожидается: https://vk.com/call/join/...");
+    return;
+  }
+
+  const config = loadConfig();
+  if (link === config.vkCallLink) {
+    await ctx.reply("ℹ️ Эта ссылка уже активна.");
+    return;
+  }
+
+  isApplying = true;
+  const statusMsg = await ctx.reply("⏳ Применяю ссылку...");
+  const chatId = ctx.chat!.id;
+
+  const updateStatus = async (text: string) => {
+    try {
+      await ctx.api.editMessageText(chatId, statusMsg.message_id, text);
+    } catch {
+      // Telegram может отклонить edit если текст не изменился
+    }
+  };
+
+  try {
+    // Шаг 1: сохранение в конфиг
+    try {
+      config.vkCallLink = link;
+      config.updatedAt = new Date().toISOString();
+      saveConfig(config);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      await updateStatus(`❌ Не удалось сохранить конфиг: ${msg}`);
+      return;
+    }
+
+    // Шаг 2: публикация в VK
+    let vkStatus = "";
+    await updateStatus("⏳ Ссылка сохранена. Публикую в VK...");
+
+    const vkResult = await publishToVk(link);
+    if (vkResult.ok) {
+      vkStatus = "VK обновлён";
+    } else if (!isVkConfigured) {
+      vkStatus = "VK relay не настроен";
+    } else {
+      vkStatus = `VK: ${vkResult.error}`;
+    }
+
+    // Шаг 3: health check с retries
+    const healthResult = await checkLinkHealth(link, config, async (attempt) => {
+      await updateStatus(`⏳ ${vkStatus}. Проверяю TURN (${attempt}/5)...`);
+    });
+
+    // Шаг 4: финальный отчёт
+    const parts: string[] = [];
+
+    if (healthResult.alive) {
+      parts.push("✅ Ссылка применена, TURN жив");
+    } else {
+      parts.push(`⚠️ Ссылка сохранена, но TURN не отвечает (${healthResult.attempts}/5 попыток)`);
+    }
+    parts.push(vkStatus);
+
+    if (healthResult.error && healthResult.alive) {
+      parts.push(healthResult.error);
+    }
+
+    config.stats.lastCheckOk = healthResult.alive;
+    config.stats.lastCheckAt = new Date().toISOString();
+    config.stats.lastCheckDetails = healthResult.alive
+      ? `Ссылка проверена, ${healthResult.attempts} попыток`
+      : healthResult.error || "TURN не отвечает";
+    saveConfig(config);
+
+    await updateStatus(parts.join("\n"));
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    await updateStatus(`❌ Ошибка: ${msg}`);
+  } finally {
+    isApplying = false;
+  }
 }
 
 // ─── Проверка здоровья TURN ─────────────────────────────────
@@ -191,71 +378,27 @@ async function checkTurnHealth(): Promise<{
 
 // ─── Управление сервисом ────────────────────────────────────
 
-/** Извлекает данные из ссылки VK-звонка и обновляет конфиг */
-async function updateCallLink(newLink: string): Promise<string> {
-  // Валидация формата ссылки
-  const vkCallRegex = /^https:\/\/vk\.(com|ru)\/call\/join\/[A-Za-z0-9_/-]+$/;
-  if (!vkCallRegex.test(newLink)) {
-    throw new Error(
-      "Неверный формат ссылки. Ожидается: https://vk.com/call/join/... или https://vk.ru/call/join/..."
-    );
-  }
-
-  const config = loadConfig();
-  const oldLink = config.vkCallLink;
-
-  config.vkCallLink = newLink;
-  config.updatedAt = new Date().toISOString();
-  saveConfig(config);
-
-  return oldLink
-    ? `Ссылка обновлена.\nСтарая: ${oldLink.slice(0, 40)}...\nНовая: ${newLink.slice(0, 40)}...`
-    : `Ссылка установлена: ${newLink.slice(0, 40)}...`;
-}
-
-/** Перезапускает vk-turn-proxy сервис с новыми параметрами */
+/** Перезапускает vk-turn-proxy сервис (простой restart без override) */
 async function restartService(): Promise<string> {
-  const config = loadConfig();
-
-  if (!config.vkCallLink) {
-    throw new Error("Сначала задай ссылку на VK-звонок через /setlink");
-  }
-
   try {
-    // Обновляем аргументы в systemd override
-    const overrideContent = [
-      "[Service]",
-      `IPAccounting=yes`,
-      `ExecStart=`,
-      `ExecStart=${VK_TURN_SERVER_PATH} \\`,
-      `  -listen 0.0.0.0:${config.turnListenPort} \\`,
-      `  -connect 127.0.0.1:${config.wgPeerPort}`,
-    ].join("\n");
-
-    writeFileSync(
-      `/etc/systemd/system/${SYSTEMD_SERVICE}.service.d/override.conf`,
-      overrideContent
-    );
-
-    await execAsync("systemctl daemon-reload");
     await execAsync(`systemctl restart ${SYSTEMD_SERVICE}`);
 
-    // Ждём 3 секунды и проверяем, что сервис поднялся
+    // Ждём 3 секунды и проверяем
     await new Promise((resolve) => setTimeout(resolve, 3000));
 
     const { stdout } = await execAsync(
       `systemctl is-active ${SYSTEMD_SERVICE}`
     );
 
+    const config = loadConfig();
     config.stats.totalRestarts++;
     config.stats.uptimeSince = new Date().toISOString();
     saveConfig(config);
 
     if (stdout.trim() === "active") {
-      return `Сервис перезапущен. Статус: active`;
-    } else {
-      return `Сервис перезапущен, но статус: ${stdout.trim()}. Проверь логи!`;
+      return "Сервис перезапущен. Статус: active";
     }
+    return `Сервис перезапущен, но статус: ${stdout.trim()}. Проверь логи!`;
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     throw new Error(`Ошибка перезапуска: ${msg}`);
@@ -370,7 +513,7 @@ async function handleStatus(ctx: Context): Promise<void> {
 bot.command("status", handleStatus);
 bot.hears("Статус", handleStatus);
 
-// /setlink — обновление ссылки на VK-звонок
+// /setlink — применение ссылки на VK-звонок
 bot.command("setlink", async (ctx) => {
   const link = ctx.match?.trim();
 
@@ -379,28 +522,7 @@ bot.command("setlink", async (ctx) => {
     return;
   }
 
-  try {
-    const result = await updateCallLink(link);
-    const msg = await ctx.reply(`✅ ${result}\n\n⏳ Перезапускаю сервис...`);
-    try {
-      const restartResult = await restartService();
-      await ctx.api.editMessageText(
-        ctx.chat!.id,
-        msg.message_id,
-        `✅ ${result}\n\n✅ ${restartResult}`
-      );
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      await ctx.api.editMessageText(
-        ctx.chat!.id,
-        msg.message_id,
-        `✅ ${result}\n\n❌ ${errMsg}`
-      );
-    }
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    await ctx.reply(`❌ ${msg}`);
-  }
+  await applyLink(link, ctx);
 });
 
 // /restart — перезапуск сервиса
@@ -501,43 +623,16 @@ async function handleMonitor(ctx: Context): Promise<void> {
 bot.command("monitor", handleMonitor);
 bot.hears("Мониторинг", handleMonitor);
 
-// Обработка простых сообщений — автоматически применяем ссылку VK
+// Обработка текстовых сообщений — автоприменение VK-ссылки
 bot.on("message:text", async (ctx) => {
   const text = ctx.message.text.trim();
 
   if (/^https:\/\/vk\.(com|ru)\/call\/join\//.test(text)) {
-    try {
-      const result = await updateCallLink(text);
-      const msg = await ctx.reply(`🔗 ${result}\n\n⏳ Перезапускаю сервис...`);
-      try {
-        const restartResult = await restartService();
-        await ctx.api.editMessageText(
-          ctx.chat!.id,
-          msg.message_id,
-          `🔗 ${result}\n\n✅ ${restartResult}`
-        );
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        await ctx.api.editMessageText(
-          ctx.chat!.id,
-          msg.message_id,
-          `🔗 ${result}\n\n❌ ${errMsg}`
-        );
-      }
-    } catch (error) {
-      const errMsg = error instanceof Error ? error.message : String(error);
-      await ctx.reply(`❌ ${errMsg}`);
-    }
+    await applyLink(text, ctx);
     return;
   }
 
-  await ctx.reply(
-    "Нераспознанная команда. Отправь новую ссылку VK-звонка или используй:\n\n" +
-      "/status — проверка TURN\n" +
-      "/stats — статистика\n" +
-      "/restart — перезапуск сервиса\n" +
-      "/config — текущая конфигурация"
-  );
+  await ctx.reply("Неизвестная команда. Отправь /start для списка команд.");
 });
 
 // ─── Фоновый мониторинг ─────────────────────────────────────
@@ -576,7 +671,7 @@ async function runHealthCheck(): Promise<void> {
       await bot.api.sendMessage(
         ADMIN_CHAT_ID,
         `🚨 TURN не отвечает!\n\n${result.details}\n\n` +
-          `Отправь новую ссылку VK-звонка или выполни /restart`
+          `Отправь новую ссылку VK-звонка`
       );
     } catch (error) {
       console.error("Не удалось отправить алерт:", error);
@@ -713,6 +808,16 @@ async function main(): Promise<void> {
   config.stats.uptimeSince = new Date().toISOString();
   config.dailyStats.trafficSnapshotBytes = await getServiceTrafficBytes();
   saveConfig(config);
+
+  // Проверка VK relay конфигурации
+  if (!isVkConfigured) {
+    const hasAny = VK_GROUP_TOKEN || VK_GROUP_ID || VK_POST_ID;
+    if (hasAny) {
+      console.warn("VK relay частично настроен — нужны все три: VK_GROUP_TOKEN, VK_GROUP_ID, VK_POST_ID");
+    } else {
+      console.log("VK relay не настроен — публикация ссылок в VK отключена");
+    }
+  }
 
   // Запускаем фоновый мониторинг
   startMonitor();
