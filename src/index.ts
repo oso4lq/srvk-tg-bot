@@ -36,6 +36,8 @@ interface TurnConfig {
   };
   /** Мониторинг включён */
   monitoringEnabled: boolean;
+  /** Очередь резервных VK call ссылок */
+  linkQueue: string[];
 }
 
 const BOT_TOKEN = process.env.BOT_TOKEN!;
@@ -82,6 +84,7 @@ function loadConfig(): TurnConfig {
       },
       dailyStats: DEFAULT_DAILY_STATS(),
       monitoringEnabled: true,
+      linkQueue: [],
     };
     saveConfig(defaultConfig);
     return defaultConfig;
@@ -91,6 +94,7 @@ function loadConfig(): TurnConfig {
   if (!raw.dailyStats) raw.dailyStats = DEFAULT_DAILY_STATS();
   if (!raw.stats.lastCheckDetails) raw.stats.lastCheckDetails = "";
   if (raw.monitoringEnabled === undefined) raw.monitoringEnabled = true;
+  if (!Array.isArray(raw.linkQueue)) raw.linkQueue = [];
   return raw as TurnConfig;
 }
 
