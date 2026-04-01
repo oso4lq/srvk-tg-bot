@@ -49,7 +49,7 @@ const CONFIG_PATH = process.env.CONFIG_PATH || "/etc/vk-turn-proxy/config.json";
 const SYSTEMD_SERVICE = process.env.SYSTEMD_SERVICE || "vk-turn-proxy";
 const VK_TURN_CLIENT_PATH = process.env.VK_TURN_CLIENT_PATH || "/usr/local/bin/vk-turn-client";
 const VPS_PUBLIC_IP = process.env.VPS_PUBLIC_IP || "";
-const CHECK_INTERVAL_MS = (Number(process.env.CHECK_INTERVAL_MIN) || 5) * 60 * 1000;
+// CHECK_INTERVAL_MIN больше не используется — интервал рандомизирован (5–10 мин)
 
 // VK API для публикации ссылки на стену закрытой группы
 const VK_GROUP_TOKEN = process.env.VK_GROUP_TOKEN || "";
@@ -396,7 +396,7 @@ async function tryFallbackFromQueue(): Promise<boolean> {
     const deadLink = config.vkCallLink;
     let activated = false;
 
-    // Итерируем с конца, чтобы безопасно удалять по индексу
+    // При splice без инкремента i — следующий элемент сдвигается на текущий индекс
     let i = 0;
     while (i < config.linkQueue.length) {
       const candidate = config.linkQueue[i];
