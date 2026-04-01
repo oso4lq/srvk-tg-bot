@@ -85,21 +85,6 @@ function saveConfig(config: TurnConfig): void {
   writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
 }
 
-// ─── Имена для health check ──────────────────────────────────
-
-const FISH_NAMES = [
-  "Salmo", "Esox", "Perca", "Silurus", "Cyprinus",
-  "Thunnus", "Gadus", "Clupea", "Squalus", "Anguilla",
-  "Rutilus", "Gobio", "Barbus", "Tinca", "Lota",
-  "Lucioperca", "Acipenser", "Hucho", "Cobitis", "Mugil",
-  "Solea", "Scophthalmus", "Mullus", "Dentex", "Sparus",
-  "Abramis", "Leuciscus", "Carassius", "Phoxinus", "Salvelinus",
-];
-
-function randomFishName(): string {
-  return FISH_NAMES[Math.floor(Math.random() * FISH_NAMES.length)];
-}
-
 // ─── Проверка здоровья TURN ─────────────────────────────────
 
 /**
@@ -159,7 +144,7 @@ async function checkTurnHealth(): Promise<{
             `-vk-link "${config.vkCallLink}" ` +
             `-peer ${VPS_PUBLIC_IP}:${config.turnListenPort} ` +
             `-listen 127.0.0.1:0 ` +
-            `-n 1 -name ${randomFishName()} 2>&1`,
+            `-n 1 2>&1`,
           { timeout: 15_000 }
         );
         // Клиент завершился с кодом 0 до таймаута — ОК
