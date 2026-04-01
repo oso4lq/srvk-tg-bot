@@ -833,11 +833,11 @@ async function main(): Promise<void> {
       // Уведомляем админа о запуске и показываем клавиатуру
       const startConfig = loadConfig();
       const monitorState = startConfig.monitoringEnabled ? "✅" : "⏸ выключен";
-      const vkState = isVkConfigured ? "✅" : "выключен";
+      const vkState = isVkConfigured ? "✅" : "выключена";
       bot.api
         .sendMessage(
           ADMIN_CHAT_ID,
-          `🟢 VK TURN Monitor запущен\n\nМониторинг: ${monitorState}\nVK relay: ${vkState}\n\nДля обновления ссылки отправь её в чат`,
+          `🟢 VK TURN Monitor запущен\n\nМониторинг: ${monitorState}\nПубликация в VK: ${vkState}\n\nДля обновления ссылки отправь её в чат`,
           { reply_markup: mainKeyboard }
         )
         .catch(() => {});
