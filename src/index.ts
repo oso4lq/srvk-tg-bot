@@ -314,8 +314,8 @@ function isAdmin(ctx: Context): boolean {
 const bot = new Bot(BOT_TOKEN);
 
 const mainKeyboard = new Keyboard()
-  .text("/status").text("/stats").row()
-  .text("/restart").text("/config")
+  .text("Статус").text("Статистика").row()
+  .text("Перезапуск").text("Конфиг")
   .resized()
   .persistent();
 
@@ -343,7 +343,7 @@ bot.command("start", async (ctx) => {
 });
 
 // /status — проверка TURN
-bot.command("status", async (ctx) => {
+async function handleStatus(ctx: Context): Promise<void> {
   const msg = await ctx.reply("⏳ Проверяю TURN...");
 
   const result = await checkTurnHealth();
@@ -360,7 +360,9 @@ bot.command("status", async (ctx) => {
     msg.message_id,
     `${icon} TURN ${result.alive ? "жив" : "мёртв"}\n\n${result.details}`
   );
-});
+}
+bot.command("status", handleStatus);
+bot.hears("Статус", handleStatus);
 
 // /setlink — обновление ссылки на VK-звонок
 bot.command("setlink", async (ctx) => {
@@ -396,7 +398,7 @@ bot.command("setlink", async (ctx) => {
 });
 
 // /restart — перезапуск сервиса
-bot.command("restart", async (ctx) => {
+async function handleRestart(ctx: Context): Promise<void> {
   const msg = await ctx.reply("⏳ Перезапускаю vk-turn-proxy...");
 
   try {
@@ -410,10 +412,12 @@ bot.command("restart", async (ctx) => {
       `❌ ${errMsg}`
     );
   }
-});
+}
+bot.command("restart", handleRestart);
+bot.hears("Перезапуск", handleRestart);
 
 // /stats — статистика
-bot.command("stats", async (ctx) => {
+async function handleStats(ctx: Context): Promise<void> {
   const config = loadConfig();
   const s = config.stats;
 
@@ -455,10 +459,12 @@ bot.command("stats", async (ctx) => {
   ];
 
   await ctx.reply(lines.filter((l) => l !== null).join("\n"));
-});
+}
+bot.command("stats", handleStats);
+bot.hears("Статистика", handleStats);
 
 // /config — текущая конфигурация (без секретов)
-bot.command("config", async (ctx) => {
+async function handleConfig(ctx: Context): Promise<void> {
   const config = loadConfig();
 
   // Маскируем ссылку — показываем только начало
@@ -473,7 +479,9 @@ bot.command("config", async (ctx) => {
       `TURN порт: ${config.turnListenPort}\n` +
       `Интервал проверки: ${CHECK_INTERVAL_MS / 60_000} мин`
   );
-});
+}
+bot.command("config", handleConfig);
+bot.hears("Конфиг", handleConfig);
 
 // Обработка простых сообщений — автоматически применяем ссылку VK
 bot.on("message:text", async (ctx) => {
@@ -701,9 +709,11 @@ async function main(): Promise<void> {
 
       // Уведомляем админа о запуске и показываем клавиатуру
       bot.api
-        .sendMessage(ADMIN_CHAT_ID, "🟢 VK TURN Monitor запущен", {
-          reply_markup: mainKeyboard,
-        })
+        .sendMessage(
+          ADMIN_CHAT_ID,
+          "🟢 VK TURN Monitor запущен\n\nДля обновления ссылки proxy отправь новую ссылку в чат",
+          { reply_markup: mainKeyboard }
+        )
         .catch(() => {});
     },
   });
