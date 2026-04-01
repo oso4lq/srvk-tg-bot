@@ -382,6 +382,84 @@ async function checkTurnHealth(): Promise<{
   }
 }
 
+/**
+ * Перебирает linkQueue, ищет живую ссылку для замены мёртвой активной.
+ * Мёртвые ссылки удаляются из очереди. Живая активируется и постится в VK.
+ * Возвращает true если fallback удался.
+ */
+async function tryFallbackFromQueue(): Promise<boolean> {
+  if (isApplying) return false;
+  isApplying = true;
+
+  try {
+    const config = loadConfig();
+    const deadLink = config.vkCallLink;
+    let activated = false;
+
+    // Итерируем с конца, чтобы безопасно удалять по индексу
+    let i = 0;
+    while (i < config.linkQueue.length) {
+      const candidate = config.linkQueue[i];
+
+      // Пропускаем ссылку, совпадающую с текущей активной
+      if (candidate === deadLink) {
+        i++;
+        continue;
+      }
+
+      const result = await checkLinkHealth(candidate, config, undefined, 2, 10_000);
+
+      if (result.alive) {
+        // Активируем
+        config.vkCallLink = candidate;
+        config.updatedAt = new Date().toISOString();
+        config.stats.lastCheckOk = true;
+        config.stats.lastCheckAt = new Date().toISOString();
+        config.stats.lastCheckDetails = `Fallback: переключение на резервную ссылку`;
+        saveConfig(config);
+
+        // Публикуем в VK (не фатально при ошибке)
+        const vkResult = await publishToVk(candidate);
+        const vkNote = vkResult.ok ? "" : `\n⚠️ VK: ${vkResult.error}`;
+
+        await notifyAdmins(
+          `🔄 Ссылка умерла, переключился на резервную\n` +
+            `Новая: ${candidate}\n` +
+            `Ссылок в очереди: ${config.linkQueue.length}${vkNote}`
+        );
+
+        activated = true;
+        break;
+      } else {
+        // Мёртвая — удаляем из очереди
+        config.linkQueue.splice(i, 1);
+        saveConfig(config);
+
+        await notifyAdmins(
+          `❌ Резервная ссылка мертва, удалена:\n${candidate}`
+        );
+        // Не увеличиваем i — следующий элемент сдвинулся на текущий индекс
+      }
+    }
+
+    if (!activated) {
+      // Удаляем из очереди ссылку, совпадающую с мёртвой активной (если есть)
+      config.linkQueue = config.linkQueue.filter((l) => l !== deadLink);
+      saveConfig(config);
+
+      await notifyAdmins(
+        `🚨 Все ссылки мертвы!\n` +
+          `Очередь пуста, валидных ссылок нет.\n` +
+          `Отправь новые ссылки в чат.`
+      );
+    }
+
+    return activated;
+  } finally {
+    isApplying = false;
+  }
+}
+
 // ─── Управление сервисом ────────────────────────────────────
 
 /** Перезапускает vk-turn-proxy сервис (простой restart без override) */
@@ -659,7 +737,6 @@ let monitorTimeout: ReturnType<typeof setTimeout>;
 async function runHealthCheck(): Promise<void> {
   const config = loadConfig();
 
-  // Не проверяем, если мониторинг выключен или ссылка не задана
   if (!config.monitoringEnabled || !config.vkCallLink) return;
 
   const result = await checkTurnHealth();
@@ -668,27 +745,29 @@ async function runHealthCheck(): Promise<void> {
   config.stats.lastCheckAt = new Date().toISOString();
   config.stats.lastCheckDetails = result.details;
 
-  // Записываем инцидент
   if (!result.alive) {
     config.dailyStats.failedChecks++;
     const ts = new Date().toLocaleString("ru");
     const short = result.details.split("\n")[0];
     config.dailyStats.incidents.push(`${ts} — ${short}`);
-    // Ограничиваем список последними 50 записями
     if (config.dailyStats.incidents.length > 50) {
       config.dailyStats.incidents = config.dailyStats.incidents.slice(-50);
     }
+    saveConfig(config);
+
+    // Пробуем fallback из очереди
+    const fallbackOk = await tryFallbackFromQueue();
+
+    if (!fallbackOk) {
+      await notifyAdmins(
+        `🚨 TURN не отвечает!\n\n${result.details}\n\n` +
+          `Отправь новую ссылку VK-звонка`
+      );
+    }
+    return;
   }
 
   saveConfig(config);
-
-  // Алерт только если TURN упал
-  if (!result.alive) {
-    await notifyAdmins(
-      `🚨 TURN не отвечает!\n\n${result.details}\n\n` +
-        `Отправь новую ссылку VK-звонка`
-    );
-  }
 }
 
 /** Случайный интервал 5–10 минут, избегая кратных 30 000 мс */
