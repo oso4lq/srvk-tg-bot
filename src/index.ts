@@ -622,7 +622,7 @@ async function handleConfig(ctx: Context): Promise<void> {
       `VK-звонок: ${maskedLink}\n` +
       `WG peer: ${config.wgPeerAddress}:${config.wgPeerPort}\n` +
       `TURN порт: ${config.turnListenPort}\n` +
-      `Интервал проверки: ${CHECK_INTERVAL_MS / 60_000} мин`
+      `Интервал проверки: 5–10 мин (рандом)`
   );
 }
 bot.command("config", handleConfig);
@@ -654,7 +654,7 @@ bot.on("message:text", async (ctx) => {
 
 // ─── Фоновый мониторинг ─────────────────────────────────────
 
-let monitorInterval: ReturnType<typeof setInterval>;
+let monitorTimeout: ReturnType<typeof setTimeout>;
 
 async function runHealthCheck(): Promise<void> {
   const config = loadConfig();
@@ -691,16 +691,26 @@ async function runHealthCheck(): Promise<void> {
   }
 }
 
+/** Случайный интервал 5–10 минут, избегая кратных 30 000 мс */
+function randomCheckInterval(): number {
+  const minMs = 5 * 60 * 1000;
+  const maxMs = 10 * 60 * 1000;
+  let ms = minMs + Math.floor(Math.random() * (maxMs - minMs + 1));
+  while (ms % 30000 === 0) {
+    ms = minMs + Math.floor(Math.random() * (maxMs - minMs + 1));
+  }
+  return ms;
+}
+
 function startMonitor(): void {
-  console.log(
-    `Мониторинг запущен, интервал: ${CHECK_INTERVAL_MS / 60_000} мин`
-  );
+  console.log("Мониторинг запущен (рандомный интервал 5–10 мин)");
 
   // Первая проверка через 30 секунд после старта
-  setTimeout(() => runHealthCheck(), 30_000);
-
-  // Далее — по расписанию
-  monitorInterval = setInterval(() => runHealthCheck(), CHECK_INTERVAL_MS);
+  monitorTimeout = setTimeout(async function scheduleNext() {
+    await runHealthCheck();
+    const nextInterval = randomCheckInterval();
+    monitorTimeout = setTimeout(scheduleNext, nextInterval);
+  }, 30_000);
 }
 
 // ─── Ежедневный отчёт ────────────────────────────────────────
@@ -850,13 +860,13 @@ async function main(): Promise<void> {
 // Graceful shutdown
 process.on("SIGINT", () => {
   console.log("Остановка...");
-  clearInterval(monitorInterval);
+  clearTimeout(monitorTimeout);
   bot.stop();
   process.exit(0);
 });
 
 process.on("SIGTERM", () => {
-  clearInterval(monitorInterval);
+  clearTimeout(monitorTimeout);
   bot.stop();
   process.exit(0);
 });
