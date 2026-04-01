@@ -34,6 +34,7 @@ const ADMIN_CHAT_ID = Number(process.env.ADMIN_CHAT_ID!);
 const CONFIG_PATH = process.env.CONFIG_PATH || "/etc/vk-turn-proxy/config.json";
 const SYSTEMD_SERVICE = process.env.SYSTEMD_SERVICE || "vk-turn-proxy";
 const VK_TURN_CLIENT_PATH = process.env.VK_TURN_CLIENT_PATH || "/usr/local/bin/vk-turn-client";
+const VK_TURN_SERVER_PATH = process.env.VK_TURN_SERVER_PATH || "/usr/local/bin/vk-turn-server";
 const VPS_PUBLIC_IP = process.env.VPS_PUBLIC_IP || "";
 const CHECK_INTERVAL_MS = (Number(process.env.CHECK_INTERVAL_MIN) || 5) * 60 * 1000;
 
@@ -202,7 +203,7 @@ async function restartService(): Promise<string> {
     const overrideContent = [
       "[Service]",
       `ExecStart=`,
-      `ExecStart=${VK_TURN_CLIENT_PATH}-server \\`,
+      `ExecStart=${VK_TURN_SERVER_PATH} \\`,
       `  -listen 0.0.0.0:${config.turnListenPort} \\`,
       `  -connect 127.0.0.1:${config.wgPeerPort}`,
     ].join("\n");

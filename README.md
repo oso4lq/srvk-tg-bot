@@ -86,8 +86,11 @@ ADMIN_CHAT_ID=123456789
 Остальные поля можно оставить по умолчанию:
 
 ```env
-# Путь к бинарнику vk-turn-proxy клиента на VPS
+# Путь к бинарнику vk-turn-client (для проверки ссылки)
 VK_TURN_CLIENT_PATH=/usr/local/bin/vk-turn-client
+
+# Путь к бинарнику vk-turn-server
+VK_TURN_SERVER_PATH=/usr/local/bin/vk-turn-server
 
 # Путь к конфиг-файлу
 CONFIG_PATH=/etc/vk-turn-proxy/config.json
