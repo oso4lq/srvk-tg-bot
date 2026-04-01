@@ -159,7 +159,7 @@ async function checkTurnHealth(): Promise<{
             `-vk-link "${config.vkCallLink}" ` +
             `-peer ${VPS_PUBLIC_IP}:${config.turnListenPort} ` +
             `-listen 127.0.0.1:0 ` +
-            `-n ${randomFishName()} 2>&1`,
+            `-n 1 -name ${randomFishName()} 2>&1`,
           { timeout: 15_000 }
         );
         // Клиент завершился с кодом 0 до таймаута — ОК
