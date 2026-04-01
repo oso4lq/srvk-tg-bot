@@ -575,10 +575,13 @@ bot.use(async (ctx, next) => {
 bot.command("start", async (ctx) => {
   await ctx.reply(
     "🔧 VK TURN Proxy Monitor\n\n" +
-      "Для обновления ссылки отправь её в чат.\n\n" +
+      "Отправь ссылку в чат — она добавится в очередь резервных.\n" +
+      "Для принудительной активации: /setlink <url>\n\n" +
       "Команды:\n" +
       "/status — проверка здоровья TURN\n" +
       "/stats — статистика\n" +
+      "/links — очередь резервных ссылок\n" +
+      "/rmlink N — удалить ссылку из очереди\n" +
       "/restart — перезапустить vk-turn-proxy\n" +
       "/config — текущая конфигурация\n" +
       "/monitor — вкл/выкл мониторинг",
@@ -919,6 +922,7 @@ async function sendDailyReport(): Promise<void> {
     `Аптайм бота: ${formatUptime(config.stats.uptimeSince)}`,
     `Активные подключения: ${connCount}`,
     `Трафик за сутки: ${trafficStr}`,
+    `Ссылок в очереди: ${config.linkQueue.length}`,
     ``,
     `Происшествия: ${ds.failedChecks === 0 ? "нет ✅" : `${ds.failedChecks} ⚠️`}`,
   ];
@@ -993,15 +997,33 @@ async function main(): Promise<void> {
 
   // Запускаем бота
   bot.start({
-    onStart: () => {
+    onStart: async () => {
       console.log("Бот запущен");
 
-      // Уведомляем админа о запуске и показываем клавиатуру
+      // Fallback при старте: проверяем активную ссылку ДО отправки уведомления
+      try {
+        const preConfig = loadConfig();
+        if (preConfig.vkCallLink && preConfig.linkQueue.length > 0) {
+          const health = await checkLinkHealth(preConfig.vkCallLink, preConfig, undefined, 2, 10_000);
+          if (!health.alive) {
+            await tryFallbackFromQueue();
+          }
+        }
+      } catch (err) {
+        console.error("Startup fallback failed:", err);
+      }
+
+      // Уведомление о запуске (после fallback — актуальные данные)
       const startConfig = loadConfig();
       const monitorState = startConfig.monitoringEnabled ? "✅" : "⏸ выключен";
       const vkState = isVkConfigured ? "✅" : "выключена";
+      const queueCount = startConfig.linkQueue.length;
+      const queueLine = queueCount > 0
+        ? `Ссылок в очереди: ${queueCount}`
+        : "Очередь пуста";
+
       notifyAdmins(
-        `🟢 VK TURN Monitor запущен\n\nМониторинг: ${monitorState}\nПубликация в VK: ${vkState}\n\nДля обновления ссылки отправь её в чат`,
+        `🟢 VK TURN Monitor запущен\n\nМониторинг: ${monitorState}\nПубликация в VK: ${vkState}\n${queueLine}\n\nДля обновления ссылки отправь её в чат`,
         { reply_markup: mainKeyboard }
       ).catch(() => {});
     },
