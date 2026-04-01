@@ -410,7 +410,8 @@ async function tryFallbackFromQueue(): Promise<boolean> {
       const result = await checkLinkHealth(candidate, config, undefined, 2, 10_000);
 
       if (result.alive) {
-        // Активируем
+        // Активируем и удаляем из очереди
+        config.linkQueue.splice(i, 1);
         config.vkCallLink = candidate;
         config.updatedAt = new Date().toISOString();
         config.stats.lastCheckOk = true;
