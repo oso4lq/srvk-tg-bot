@@ -1,4 +1,4 @@
-import { Bot, Context } from "grammy";
+import { Bot, Context, Keyboard } from "grammy";
 import { exec, execSync } from "child_process";
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { promisify } from "util";
@@ -27,6 +27,13 @@ interface TurnConfig {
     lastCheckDetails: string;
     uptimeSince: string;
   };
+  /** Дневная статистика (сбрасывается при отправке отчёта) */
+  dailyStats: {
+    failedChecks: number;
+    incidents: string[];
+    periodStart: string;
+    trafficSnapshotBytes: number;
+  };
 }
 
 const BOT_TOKEN = process.env.BOT_TOKEN!;
@@ -39,6 +46,13 @@ const VPS_PUBLIC_IP = process.env.VPS_PUBLIC_IP || "";
 const CHECK_INTERVAL_MS = (Number(process.env.CHECK_INTERVAL_MIN) || 5) * 60 * 1000;
 
 // ─── Работа с конфигом ──────────────────────────────────────
+
+const DEFAULT_DAILY_STATS = (): TurnConfig["dailyStats"] => ({
+  failedChecks: 0,
+  incidents: [],
+  periodStart: new Date().toISOString(),
+  trafficSnapshotBytes: 0,
+});
 
 function loadConfig(): TurnConfig {
   if (!existsSync(CONFIG_PATH)) {
@@ -55,11 +69,16 @@ function loadConfig(): TurnConfig {
         lastCheckDetails: "",
         uptimeSince: new Date().toISOString(),
       },
+      dailyStats: DEFAULT_DAILY_STATS(),
     };
     saveConfig(defaultConfig);
     return defaultConfig;
   }
-  return JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+  const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+  // Backwards compat
+  if (!raw.dailyStats) raw.dailyStats = DEFAULT_DAILY_STATS();
+  if (!raw.stats.lastCheckDetails) raw.stats.lastCheckDetails = "";
+  return raw as TurnConfig;
 }
 
 function saveConfig(config: TurnConfig): void {
@@ -202,6 +221,7 @@ async function restartService(): Promise<string> {
     // Обновляем аргументы в systemd override
     const overrideContent = [
       "[Service]",
+      `IPAccounting=yes`,
       `ExecStart=`,
       `ExecStart=${VK_TURN_SERVER_PATH} \\`,
       `  -listen 0.0.0.0:${config.turnListenPort} \\`,
@@ -253,6 +273,36 @@ function formatUptime(since: string): string {
   return `${hours}ч ${minutes}м`;
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes <= 0) return "0 Б";
+  const units = ["Б", "КБ", "МБ", "ГБ", "ТБ"];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
+}
+
+function parseSystemdProps(stdout: string): Record<string, string> {
+  const props: Record<string, string> = {};
+  for (const line of stdout.trim().split("\n")) {
+    const idx = line.indexOf("=");
+    if (idx > 0) props[line.slice(0, idx)] = line.slice(idx + 1);
+  }
+  return props;
+}
+
+async function getServiceTrafficBytes(): Promise<number> {
+  try {
+    const { stdout } = await execAsync(
+      `systemctl show ${SYSTEMD_SERVICE} --property=IPIngressBytes,IPEgressBytes 2>/dev/null`
+    );
+    const props = parseSystemdProps(stdout);
+    const ingress = parseInt(props.IPIngressBytes || "0", 10);
+    const egress = parseInt(props.IPEgressBytes || "0", 10);
+    return (isNaN(ingress) ? 0 : ingress) + (isNaN(egress) ? 0 : egress);
+  } catch {
+    return 0;
+  }
+}
+
 // ─── Гарда: только админ ────────────────────────────────────
 
 function isAdmin(ctx: Context): boolean {
@@ -262,6 +312,12 @@ function isAdmin(ctx: Context): boolean {
 // ─── Инициализация бота ─────────────────────────────────────
 
 const bot = new Bot(BOT_TOKEN);
+
+const mainKeyboard = new Keyboard()
+  .text("/status").text("/stats").row()
+  .text("/restart").text("/config")
+  .resized()
+  .persistent();
 
 // Middleware: фильтруем все сообщения не от админа
 bot.use(async (ctx, next) => {
@@ -276,12 +332,13 @@ bot.use(async (ctx, next) => {
 bot.command("start", async (ctx) => {
   await ctx.reply(
     "🔧 VK TURN Proxy Monitor\n\n" +
+      "Для обновления ссылки отправь её в чат.\n\n" +
       "Команды:\n" +
       "/status — проверка здоровья TURN\n" +
-      "/setlink <url> — установить ссылку на VK-звонок\n" +
-      "/restart — перезапустить vk-turn-proxy\n" +
       "/stats — статистика\n" +
-      "/config — текущая конфигурация"
+      "/restart — перезапустить vk-turn-proxy\n" +
+      "/config — текущая конфигурация",
+    { reply_markup: mainKeyboard }
   );
 });
 
@@ -316,7 +373,22 @@ bot.command("setlink", async (ctx) => {
 
   try {
     const result = await updateCallLink(link);
-    await ctx.reply(`✅ ${result}\n\nВыполни /restart для применения.`);
+    const msg = await ctx.reply(`✅ ${result}\n\n⏳ Перезапускаю сервис...`);
+    try {
+      const restartResult = await restartService();
+      await ctx.api.editMessageText(
+        ctx.chat!.id,
+        msg.message_id,
+        `✅ ${result}\n\n✅ ${restartResult}`
+      );
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      await ctx.api.editMessageText(
+        ctx.chat!.id,
+        msg.message_id,
+        `✅ ${result}\n\n❌ ${errMsg}`
+      );
+    }
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     await ctx.reply(`❌ ${msg}`);
@@ -352,11 +424,7 @@ bot.command("stats", async (ctx) => {
     const { stdout } = await execAsync(
       `systemctl show ${SYSTEMD_SERVICE} --property=ActiveState,ActiveEnterTimestamp,MemoryCurrent 2>/dev/null`
     );
-    const props: Record<string, string> = {};
-    for (const line of stdout.trim().split("\n")) {
-      const idx = line.indexOf("=");
-      if (idx > 0) props[line.slice(0, idx)] = line.slice(idx + 1);
-    }
+    const props = parseSystemdProps(stdout);
     serviceState = props.ActiveState || "неизвестно";
     if (props.ActiveEnterTimestamp && serviceState === "active") {
       serviceUptime = formatUptime(
@@ -407,18 +475,43 @@ bot.command("config", async (ctx) => {
   );
 });
 
-// Обработка простых сообщений — если прислали ссылку VK, предлагаем /setlink
+// Обработка простых сообщений — автоматически применяем ссылку VK
 bot.on("message:text", async (ctx) => {
-  const text = ctx.message.text;
+  const text = ctx.message.text.trim();
 
   if (/^https:\/\/vk\.(com|ru)\/call\/join\//.test(text)) {
-    await ctx.reply(
-      `Похоже на ссылку VK-звонка. Применить?\n\n/setlink ${text}`
-    );
+    try {
+      const result = await updateCallLink(text);
+      const msg = await ctx.reply(`🔗 ${result}\n\n⏳ Перезапускаю сервис...`);
+      try {
+        const restartResult = await restartService();
+        await ctx.api.editMessageText(
+          ctx.chat!.id,
+          msg.message_id,
+          `🔗 ${result}\n\n✅ ${restartResult}`
+        );
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        await ctx.api.editMessageText(
+          ctx.chat!.id,
+          msg.message_id,
+          `🔗 ${result}\n\n❌ ${errMsg}`
+        );
+      }
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      await ctx.reply(`❌ ${errMsg}`);
+    }
     return;
   }
 
-  await ctx.reply("Неизвестная команда. Отправь /start для списка команд.");
+  await ctx.reply(
+    "Нераспознанная команда. Отправь новую ссылку VK-звонка или используй:\n\n" +
+      "/status — проверка TURN\n" +
+      "/stats — статистика\n" +
+      "/restart — перезапуск сервиса\n" +
+      "/config — текущая конфигурация"
+  );
 });
 
 // ─── Фоновый мониторинг ─────────────────────────────────────
@@ -436,6 +529,19 @@ async function runHealthCheck(): Promise<void> {
   config.stats.lastCheckOk = result.alive;
   config.stats.lastCheckAt = new Date().toISOString();
   config.stats.lastCheckDetails = result.details;
+
+  // Записываем инцидент
+  if (!result.alive) {
+    config.dailyStats.failedChecks++;
+    const ts = new Date().toLocaleString("ru");
+    const short = result.details.split("\n")[0];
+    config.dailyStats.incidents.push(`${ts} — ${short}`);
+    // Ограничиваем список последними 50 записями
+    if (config.dailyStats.incidents.length > 50) {
+      config.dailyStats.incidents = config.dailyStats.incidents.slice(-50);
+    }
+  }
+
   saveConfig(config);
 
   // Алерт только если TURN упал
@@ -464,6 +570,113 @@ function startMonitor(): void {
   monitorInterval = setInterval(() => runHealthCheck(), CHECK_INTERVAL_MS);
 }
 
+// ─── Ежедневный отчёт ────────────────────────────────────────
+
+async function sendDailyReport(): Promise<void> {
+  const config = loadConfig();
+  const ds = config.dailyStats;
+
+  // Текущий статус
+  const health = await checkTurnHealth();
+
+  // Сервис из systemd
+  let serviceState = "неизвестно";
+  let serviceUptime = "";
+  try {
+    const { stdout } = await execAsync(
+      `systemctl show ${SYSTEMD_SERVICE} --property=ActiveState,ActiveEnterTimestamp,MemoryCurrent 2>/dev/null`
+    );
+    const props = parseSystemdProps(stdout);
+    serviceState = props.ActiveState || "неизвестно";
+    if (props.ActiveEnterTimestamp && serviceState === "active") {
+      serviceUptime = formatUptime(
+        new Date(props.ActiveEnterTimestamp).toISOString()
+      );
+    }
+    const mem = parseInt(props.MemoryCurrent || "0", 10);
+    if (mem > 0) serviceState += `, ${(mem / 1024 / 1024).toFixed(1)} МБ`;
+  } catch {}
+
+  // Подключения (текущие UDP-сессии)
+  let connCount = 0;
+  try {
+    const { stdout } = await execAsync(
+      `ss -unp | grep ":${config.turnListenPort}" | wc -l`
+    );
+    connCount = parseInt(stdout.trim(), 10);
+  } catch {}
+
+  // Трафик (через systemd IPAccounting)
+  const currentBytes = await getServiceTrafficBytes();
+  const deltaBytes = currentBytes > ds.trafficSnapshotBytes
+    ? currentBytes - ds.trafficSnapshotBytes
+    : currentBytes; // Сервис перезапускался — счётчик сбросился
+  const trafficStr = currentBytes > 0
+    ? formatBytes(deltaBytes)
+    : "н/д (нужен /restart для включения IPAccounting)";
+
+  // Сборка отчёта
+  const lines = [
+    `📋 Ежедневный отчёт VK TURN Proxy`,
+    ``,
+    `Статус: ${health.alive ? "✅ OK" : "❌ Fail"}`,
+    `Сервис: ${serviceState}`,
+    serviceUptime ? `Аптайм сервиса: ${serviceUptime}` : null,
+    `Аптайм бота: ${formatUptime(config.stats.uptimeSince)}`,
+    `Активные подключения: ${connCount}`,
+    `Трафик за сутки: ${trafficStr}`,
+    ``,
+    `Происшествия: ${ds.failedChecks === 0 ? "нет ✅" : `${ds.failedChecks} ⚠️`}`,
+  ];
+
+  if (ds.incidents.length > 0) {
+    const shown = ds.incidents.slice(-10);
+    lines.push(...shown.map((i) => `  • ${i}`));
+    if (ds.incidents.length > 10) {
+      lines.push(`  ... и ещё ${ds.incidents.length - 10}`);
+    }
+  }
+
+  try {
+    await bot.api.sendMessage(
+      ADMIN_CHAT_ID,
+      lines.filter((l) => l !== null).join("\n")
+    );
+  } catch (error) {
+    console.error("Не удалось отправить ежедневный отчёт:", error);
+  }
+
+  // Сброс дневной статистики
+  config.dailyStats = {
+    failedChecks: 0,
+    incidents: [],
+    periodStart: new Date().toISOString(),
+    trafficSnapshotBytes: currentBytes,
+  };
+  config.stats.lastCheckOk = health.alive;
+  config.stats.lastCheckAt = new Date().toISOString();
+  config.stats.lastCheckDetails = health.details;
+  saveConfig(config);
+}
+
+function scheduleDailyReport(): void {
+  const now = new Date();
+  const next = new Date(now);
+  next.setUTCHours(4, 0, 0, 0);
+  if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
+
+  const delay = next.getTime() - now.getTime();
+  console.log(`Ежедневный отчёт запланирован на ${next.toISOString()}`);
+
+  setTimeout(() => {
+    sendDailyReport().catch(console.error);
+    setInterval(
+      () => sendDailyReport().catch(console.error),
+      24 * 60 * 60 * 1000
+    );
+  }, delay);
+}
+
 // ─── Запуск ─────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -472,19 +685,25 @@ async function main(): Promise<void> {
   // Инициализируем конфиг и обновляем время старта бота
   const config = loadConfig();
   config.stats.uptimeSince = new Date().toISOString();
+  config.dailyStats.trafficSnapshotBytes = await getServiceTrafficBytes();
   saveConfig(config);
 
   // Запускаем фоновый мониторинг
   startMonitor();
+
+  // Запускаем ежедневный отчёт (04:00 UTC)
+  scheduleDailyReport();
 
   // Запускаем бота
   bot.start({
     onStart: () => {
       console.log("Бот запущен");
 
-      // Уведомляем админа о запуске
+      // Уведомляем админа о запуске и показываем клавиатуру
       bot.api
-        .sendMessage(ADMIN_CHAT_ID, "🟢 VK TURN Monitor запущен")
+        .sendMessage(ADMIN_CHAT_ID, "🟢 VK TURN Monitor запущен", {
+          reply_markup: mainKeyboard,
+        })
         .catch(() => {});
     },
   });
