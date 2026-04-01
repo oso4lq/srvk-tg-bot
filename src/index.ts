@@ -442,9 +442,13 @@ async function tryFallbackFromQueue(): Promise<boolean> {
         const vkResult = await publishToVk(candidate);
         const vkNote = vkResult.ok ? "" : `\n⚠️ VK: ${vkResult.error}`;
 
+        const durationNote = config.updatedAt
+          ? `\nПрошлая ссылка проработала: ${formatUptime(config.updatedAt)}`
+          : "";
+
         await notifyAdmins(
           `🔄 Ссылка умерла, переключился на резервную\n` +
-            `Новая: ${candidate}\n` +
+            `Новая: ${candidate}${durationNote}\n` +
             `Ссылок в очереди: ${config.linkQueue.length}${vkNote}`
         );
 
@@ -1121,13 +1125,16 @@ async function main(): Promise<void> {
       const startConfig = loadConfig();
       const monitorState = startConfig.monitoringEnabled ? "✅" : "⏸ выключен";
       const vkState = isVkConfigured ? "✅" : "выключена";
+      const activeLine = startConfig.vkCallLink
+        ? `Активная ссылка: ${startConfig.vkCallLink}`
+        : "Активная ссылка не задана";
       const queueCount = startConfig.linkQueue.length;
       const queueLine = queueCount > 0
         ? `Ссылок в очереди: ${queueCount}`
         : "Очередь пуста";
 
       notifyAdmins(
-        `🟢 VK TURN Monitor запущен\n\nМониторинг: ${monitorState}\nПубликация в VK: ${vkState}\n${queueLine}\n\nДля обновления ссылки отправь её в чат`,
+        `🟢 VK TURN Monitor запущен\n\nМониторинг: ${monitorState}\nПубликация в VK: ${vkState}\n${activeLine}\n${queueLine}\n\nОтправь ссылку в чат, чтобы добавить её в очередь\n/setlink <url> — принудительная установка новой ссылки`,
         { reply_markup: mainKeyboard }
       ).catch(() => {});
     },
