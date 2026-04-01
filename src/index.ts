@@ -36,6 +36,8 @@ interface TurnConfig {
   };
   /** Мониторинг включён */
   monitoringEnabled: boolean;
+  /** Очередь резервных VK call ссылок */
+  linkQueue: string[];
 }
 
 const BOT_TOKEN = process.env.BOT_TOKEN!;
@@ -47,7 +49,7 @@ const CONFIG_PATH = process.env.CONFIG_PATH || "/etc/vk-turn-proxy/config.json";
 const SYSTEMD_SERVICE = process.env.SYSTEMD_SERVICE || "vk-turn-proxy";
 const VK_TURN_CLIENT_PATH = process.env.VK_TURN_CLIENT_PATH || "/usr/local/bin/vk-turn-client";
 const VPS_PUBLIC_IP = process.env.VPS_PUBLIC_IP || "";
-const CHECK_INTERVAL_MS = (Number(process.env.CHECK_INTERVAL_MIN) || 5) * 60 * 1000;
+// CHECK_INTERVAL_MIN больше не используется — интервал рандомизирован (5–10 мин)
 
 // VK API для публикации ссылки на стену закрытой группы
 const VK_GROUP_TOKEN = process.env.VK_GROUP_TOKEN || "";
@@ -82,6 +84,7 @@ function loadConfig(): TurnConfig {
       },
       dailyStats: DEFAULT_DAILY_STATS(),
       monitoringEnabled: true,
+      linkQueue: [],
     };
     saveConfig(defaultConfig);
     return defaultConfig;
@@ -91,6 +94,7 @@ function loadConfig(): TurnConfig {
   if (!raw.dailyStats) raw.dailyStats = DEFAULT_DAILY_STATS();
   if (!raw.stats.lastCheckDetails) raw.stats.lastCheckDetails = "";
   if (raw.monitoringEnabled === undefined) raw.monitoringEnabled = true;
+  if (!Array.isArray(raw.linkQueue)) raw.linkQueue = [];
   return raw as TurnConfig;
 }
 
@@ -378,6 +382,85 @@ async function checkTurnHealth(): Promise<{
   }
 }
 
+/**
+ * Перебирает linkQueue, ищет живую ссылку для замены мёртвой активной.
+ * Мёртвые ссылки удаляются из очереди. Живая активируется и постится в VK.
+ * Возвращает true если fallback удался.
+ */
+async function tryFallbackFromQueue(): Promise<boolean> {
+  if (isApplying) return false;
+  isApplying = true;
+
+  try {
+    const config = loadConfig();
+    const deadLink = config.vkCallLink;
+    let activated = false;
+
+    // При splice без инкремента i — следующий элемент сдвигается на текущий индекс
+    let i = 0;
+    while (i < config.linkQueue.length) {
+      const candidate = config.linkQueue[i];
+
+      // Пропускаем ссылку, совпадающую с текущей активной
+      if (candidate === deadLink) {
+        i++;
+        continue;
+      }
+
+      const result = await checkLinkHealth(candidate, config, undefined, 2, 10_000);
+
+      if (result.alive) {
+        // Активируем и удаляем из очереди
+        config.linkQueue.splice(i, 1);
+        config.vkCallLink = candidate;
+        config.updatedAt = new Date().toISOString();
+        config.stats.lastCheckOk = true;
+        config.stats.lastCheckAt = new Date().toISOString();
+        config.stats.lastCheckDetails = `Fallback: переключение на резервную ссылку`;
+        saveConfig(config);
+
+        // Публикуем в VK (не фатально при ошибке)
+        const vkResult = await publishToVk(candidate);
+        const vkNote = vkResult.ok ? "" : `\n⚠️ VK: ${vkResult.error}`;
+
+        await notifyAdmins(
+          `🔄 Ссылка умерла, переключился на резервную\n` +
+            `Новая: ${candidate}\n` +
+            `Ссылок в очереди: ${config.linkQueue.length}${vkNote}`
+        );
+
+        activated = true;
+        break;
+      } else {
+        // Мёртвая — удаляем из очереди
+        config.linkQueue.splice(i, 1);
+        saveConfig(config);
+
+        await notifyAdmins(
+          `❌ Резервная ссылка мертва, удалена:\n${candidate}`
+        );
+        // Не увеличиваем i — следующий элемент сдвинулся на текущий индекс
+      }
+    }
+
+    if (!activated) {
+      // Удаляем из очереди ссылку, совпадающую с мёртвой активной (если есть)
+      config.linkQueue = config.linkQueue.filter((l) => l !== deadLink);
+      saveConfig(config);
+
+      await notifyAdmins(
+        `🚨 Все ссылки мертвы!\n` +
+          `Очередь пуста, валидных ссылок нет.\n` +
+          `Отправь новые ссылки в чат.`
+      );
+    }
+
+    return activated;
+  } finally {
+    isApplying = false;
+  }
+}
+
 // ─── Управление сервисом ────────────────────────────────────
 
 /** Перезапускает vk-turn-proxy сервис (простой restart без override) */
@@ -493,10 +576,13 @@ bot.use(async (ctx, next) => {
 bot.command("start", async (ctx) => {
   await ctx.reply(
     "🔧 VK TURN Proxy Monitor\n\n" +
-      "Для обновления ссылки отправь её в чат.\n\n" +
+      "Отправь ссылку в чат — она добавится в очередь резервных.\n" +
+      "Для принудительной активации: /setlink <url>\n\n" +
       "Команды:\n" +
       "/status — проверка здоровья TURN\n" +
       "/stats — статистика\n" +
+      "/links — очередь резервных ссылок\n" +
+      "/rmlink N — удалить ссылку из очереди\n" +
       "/restart — перезапустить vk-turn-proxy\n" +
       "/config — текущая конфигурация\n" +
       "/monitor — вкл/выкл мониторинг",
@@ -618,7 +704,7 @@ async function handleConfig(ctx: Context): Promise<void> {
       `VK-звонок: ${maskedLink}\n` +
       `WG peer: ${config.wgPeerAddress}:${config.wgPeerPort}\n` +
       `TURN порт: ${config.turnListenPort}\n` +
-      `Интервал проверки: ${CHECK_INTERVAL_MS / 60_000} мин`
+      `Интервал проверки: 5–10 мин (рандом)`
   );
 }
 bot.command("config", handleConfig);
@@ -636,12 +722,84 @@ async function handleMonitor(ctx: Context): Promise<void> {
 bot.command("monitor", handleMonitor);
 bot.hears("Мониторинг", handleMonitor);
 
-// Обработка текстовых сообщений — автоприменение VK-ссылки
+// /links — просмотр очереди резервных ссылок
+bot.command("links", async (ctx) => {
+  const config = loadConfig();
+
+  const lines: string[] = [];
+
+  if (config.vkCallLink) {
+    lines.push(`🔗 Активная: ${config.vkCallLink}`);
+  } else {
+    lines.push("🔗 Активная ссылка не задана");
+  }
+
+  if (config.linkQueue.length === 0) {
+    lines.push("\nОчередь пуста, резервных ссылок нет.");
+  } else {
+    lines.push(`\nОчередь (${config.linkQueue.length}):`);
+    config.linkQueue.forEach((link, i) => {
+      lines.push(`${i + 1}. ${link}`);
+    });
+  }
+
+  await ctx.reply(lines.join("\n"));
+});
+
+// /rmlink N — удаление ссылки из очереди по номеру
+bot.command("rmlink", async (ctx) => {
+  const arg = ctx.match?.trim();
+  const num = Number(arg);
+
+  if (!arg || isNaN(num) || !Number.isInteger(num)) {
+    await ctx.reply("Использование: /rmlink N (номер из /links)");
+    return;
+  }
+
+  const config = loadConfig();
+  const idx = num - 1;
+
+  if (idx < 0 || idx >= config.linkQueue.length) {
+    await ctx.reply(
+      `❌ Номер должен быть от 1 до ${config.linkQueue.length}.\n` +
+        `Используй /links для просмотра очереди.`
+    );
+    return;
+  }
+
+  const removed = config.linkQueue.splice(idx, 1)[0];
+  saveConfig(config);
+
+  await ctx.reply(
+    `✅ Ссылка #${num} удалена.\n${removed}\n\nОсталось в очереди: ${config.linkQueue.length}`
+  );
+});
+
+// Обработка текстовых сообщений — добавление в очередь
 bot.on("message:text", async (ctx) => {
   const text = ctx.message.text.trim();
 
-  if (/^https:\/\/vk\.(com|ru)\/call\/join\//.test(text)) {
-    await applyLink(text, ctx);
+  if (VK_CALL_REGEX.test(text)) {
+    // Добавляем в очередь, не активируем
+    const config = loadConfig();
+
+    if (text === config.vkCallLink) {
+      await ctx.reply("ℹ️ Эта ссылка уже активна.");
+      return;
+    }
+
+    if (config.linkQueue.includes(text)) {
+      await ctx.reply("ℹ️ Эта ссылка уже в очереди.");
+      return;
+    }
+
+    config.linkQueue.push(text);
+    saveConfig(config);
+
+    await ctx.reply(
+      `✅ Ссылка добавлена в очередь (позиция ${config.linkQueue.length}).\n` +
+        `Всего ссылок в очереди: ${config.linkQueue.length}`
+    );
     return;
   }
 
@@ -650,12 +808,11 @@ bot.on("message:text", async (ctx) => {
 
 // ─── Фоновый мониторинг ─────────────────────────────────────
 
-let monitorInterval: ReturnType<typeof setInterval>;
+let monitorTimeout: ReturnType<typeof setTimeout>;
 
 async function runHealthCheck(): Promise<void> {
   const config = loadConfig();
 
-  // Не проверяем, если мониторинг выключен или ссылка не задана
   if (!config.monitoringEnabled || !config.vkCallLink) return;
 
   const result = await checkTurnHealth();
@@ -664,39 +821,51 @@ async function runHealthCheck(): Promise<void> {
   config.stats.lastCheckAt = new Date().toISOString();
   config.stats.lastCheckDetails = result.details;
 
-  // Записываем инцидент
   if (!result.alive) {
     config.dailyStats.failedChecks++;
     const ts = new Date().toLocaleString("ru");
     const short = result.details.split("\n")[0];
     config.dailyStats.incidents.push(`${ts} — ${short}`);
-    // Ограничиваем список последними 50 записями
     if (config.dailyStats.incidents.length > 50) {
       config.dailyStats.incidents = config.dailyStats.incidents.slice(-50);
     }
+    saveConfig(config);
+
+    // Пробуем fallback из очереди
+    const fallbackOk = await tryFallbackFromQueue();
+
+    if (!fallbackOk) {
+      await notifyAdmins(
+        `🚨 TURN не отвечает!\n\n${result.details}\n\n` +
+          `Отправь новую ссылку VK-звонка`
+      );
+    }
+    return;
   }
 
   saveConfig(config);
+}
 
-  // Алерт только если TURN упал
-  if (!result.alive) {
-    await notifyAdmins(
-      `🚨 TURN не отвечает!\n\n${result.details}\n\n` +
-        `Отправь новую ссылку VK-звонка`
-    );
+/** Случайный интервал 5–10 минут, избегая кратных 30 000 мс */
+function randomCheckInterval(): number {
+  const minMs = 5 * 60 * 1000;
+  const maxMs = 10 * 60 * 1000;
+  let ms = minMs + Math.floor(Math.random() * (maxMs - minMs + 1));
+  while (ms % 30000 === 0) {
+    ms = minMs + Math.floor(Math.random() * (maxMs - minMs + 1));
   }
+  return ms;
 }
 
 function startMonitor(): void {
-  console.log(
-    `Мониторинг запущен, интервал: ${CHECK_INTERVAL_MS / 60_000} мин`
-  );
+  console.log("Мониторинг запущен (рандомный интервал 5–10 мин)");
 
   // Первая проверка через 30 секунд после старта
-  setTimeout(() => runHealthCheck(), 30_000);
-
-  // Далее — по расписанию
-  monitorInterval = setInterval(() => runHealthCheck(), CHECK_INTERVAL_MS);
+  monitorTimeout = setTimeout(async function scheduleNext() {
+    await runHealthCheck();
+    const nextInterval = randomCheckInterval();
+    monitorTimeout = setTimeout(scheduleNext, nextInterval);
+  }, 30_000);
 }
 
 // ─── Ежедневный отчёт ────────────────────────────────────────
@@ -754,6 +923,7 @@ async function sendDailyReport(): Promise<void> {
     `Аптайм бота: ${formatUptime(config.stats.uptimeSince)}`,
     `Активные подключения: ${connCount}`,
     `Трафик за сутки: ${trafficStr}`,
+    `Ссылок в очереди: ${config.linkQueue.length}`,
     ``,
     `Происшествия: ${ds.failedChecks === 0 ? "нет ✅" : `${ds.failedChecks} ⚠️`}`,
   ];
@@ -828,15 +998,33 @@ async function main(): Promise<void> {
 
   // Запускаем бота
   bot.start({
-    onStart: () => {
+    onStart: async () => {
       console.log("Бот запущен");
 
-      // Уведомляем админа о запуске и показываем клавиатуру
+      // Fallback при старте: проверяем активную ссылку ДО отправки уведомления
+      try {
+        const preConfig = loadConfig();
+        if (preConfig.vkCallLink && preConfig.linkQueue.length > 0) {
+          const health = await checkLinkHealth(preConfig.vkCallLink, preConfig, undefined, 2, 10_000);
+          if (!health.alive) {
+            await tryFallbackFromQueue();
+          }
+        }
+      } catch (err) {
+        console.error("Startup fallback failed:", err);
+      }
+
+      // Уведомление о запуске (после fallback — актуальные данные)
       const startConfig = loadConfig();
       const monitorState = startConfig.monitoringEnabled ? "✅" : "⏸ выключен";
       const vkState = isVkConfigured ? "✅" : "выключена";
+      const queueCount = startConfig.linkQueue.length;
+      const queueLine = queueCount > 0
+        ? `Ссылок в очереди: ${queueCount}`
+        : "Очередь пуста";
+
       notifyAdmins(
-        `🟢 VK TURN Monitor запущен\n\nМониторинг: ${monitorState}\nПубликация в VK: ${vkState}\n\nДля обновления ссылки отправь её в чат`,
+        `🟢 VK TURN Monitor запущен\n\nМониторинг: ${monitorState}\nПубликация в VK: ${vkState}\n${queueLine}\n\nДля обновления ссылки отправь её в чат`,
         { reply_markup: mainKeyboard }
       ).catch(() => {});
     },
@@ -846,13 +1034,13 @@ async function main(): Promise<void> {
 // Graceful shutdown
 process.on("SIGINT", () => {
   console.log("Остановка...");
-  clearInterval(monitorInterval);
+  clearTimeout(monitorTimeout);
   bot.stop();
   process.exit(0);
 });
 
 process.on("SIGTERM", () => {
-  clearInterval(monitorInterval);
+  clearTimeout(monitorTimeout);
   bot.stop();
   process.exit(0);
 });
