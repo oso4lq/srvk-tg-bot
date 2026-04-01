@@ -1,4 +1,4 @@
-import { Bot, Context, Keyboard } from "grammy";
+import { Bot, Context, InlineKeyboard, Keyboard } from "grammy";
 import { exec, execSync } from "child_process";
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { promisify } from "util";
@@ -57,6 +57,14 @@ const VK_GROUP_ID = process.env.VK_GROUP_ID || "";
 const isVkConfigured = !!(VK_GROUP_TOKEN && VK_GROUP_ID);
 
 let isApplying = false;
+
+/** Ожидающие подтверждения /setlink (ключ — message_id сообщения с кнопками) */
+const pendingSetlinks = new Map<number, {
+  link: string;
+  chatId: number;
+  healthError: string;
+  timeout: ReturnType<typeof setTimeout>;
+}>();
 
 // ─── Работа с конфигом ──────────────────────────────────────
 
@@ -192,7 +200,7 @@ async function checkLinkHealth(
 
 const VK_CALL_REGEX = /^https:\/\/vk\.(com|ru)\/call\/join\/[A-Za-z0-9_/-]+$/;
 
-/** Применяет ссылку: валидация → сохранение → VK → health check → отчёт */
+/** Применяет ссылку: валидация → health check → подтверждение → сохранение → VK → отчёт */
 async function applyLink(link: string, ctx: Context): Promise<void> {
   if (isApplying) {
     await ctx.reply("⏳ Уже применяю ссылку, подожди.");
@@ -211,69 +219,80 @@ async function applyLink(link: string, ctx: Context): Promise<void> {
   }
 
   isApplying = true;
-  const statusMsg = await ctx.reply("⏳ Применяю ссылку...");
   const chatId = ctx.chat!.id;
+  const statusMsg = await ctx.reply("⏳ Проверяю TURN...");
 
-  const updateStatus = async (text: string) => {
+  const updateStatus = async (text: string, extra?: object) => {
     try {
-      await ctx.api.editMessageText(chatId, statusMsg.message_id, text);
+      await ctx.api.editMessageText(chatId, statusMsg.message_id, text, extra);
     } catch {
       // Telegram может отклонить edit если текст не изменился
     }
   };
 
   try {
-    // Шаг 1: сохранение в конфиг
-    try {
-      config.vkCallLink = link;
-      config.updatedAt = new Date().toISOString();
-      saveConfig(config);
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      await updateStatus(`❌ Не удалось сохранить конфиг: ${msg}`);
-      return;
-    }
-
-    // Шаг 2: публикация в VK
-    let vkStatus = "";
-    await updateStatus("⏳ Ссылка сохранена. Публикую в VK...");
-
-    const vkResult = await publishToVk(link);
-    if (vkResult.ok) {
-      vkStatus = "VK обновлён";
-    } else if (!isVkConfigured) {
-      vkStatus = "VK relay не настроен";
-    } else {
-      vkStatus = `VK: ${vkResult.error}`;
-    }
-
-    // Шаг 3: health check с retries
+    // Шаг 1: health check ПЕРЕД сохранением
     const healthResult = await checkLinkHealth(link, config, async (attempt) => {
-      await updateStatus(`⏳ ${vkStatus}. Проверяю TURN (${attempt}/5)...`);
+      await updateStatus(`⏳ Проверяю TURN (${attempt}/5)...`);
     });
 
-    // Шаг 4: финальный отчёт
-    const parts: string[] = [];
-
     if (healthResult.alive) {
-      parts.push("✅ Ссылка применена, TURN жив");
+      // Ссылка жива — сохраняем и публикуем сразу
+      try {
+        config.vkCallLink = link;
+        config.updatedAt = new Date().toISOString();
+        saveConfig(config);
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        await updateStatus(`❌ Не удалось сохранить конфиг: ${msg}`);
+        return;
+      }
+
+      const vkResult = await publishToVk(link);
+      let vkStatus = "";
+      if (vkResult.ok) {
+        vkStatus = "VK обновлён";
+      } else if (!isVkConfigured) {
+        vkStatus = "VK relay не настроен";
+      } else {
+        vkStatus = `VK: ${vkResult.error}`;
+      }
+
+      config.stats.lastCheckOk = true;
+      config.stats.lastCheckAt = new Date().toISOString();
+      config.stats.lastCheckDetails = `Ссылка проверена, ${healthResult.attempts} попыток`;
+      saveConfig(config);
+
+      const parts = ["✅ Ссылка применена, TURN жив", vkStatus];
+      if (healthResult.error) parts.push(healthResult.error);
+      await updateStatus(parts.join("\n"));
     } else {
-      parts.push(`⚠️ Ссылка сохранена, но TURN не отвечает (${healthResult.attempts}/5 попыток)`);
+      // Ссылка мертва — спрашиваем подтверждение
+      const keyboard = new InlineKeyboard()
+        .text("Да", `setlink:yes:${statusMsg.message_id}`)
+        .text("Нет", `setlink:no:${statusMsg.message_id}`);
+
+      await updateStatus(
+        `⚠️ Ссылка не прошла проверку (${healthResult.attempts}/5 попыток).\n` +
+          `Соединение невозможно установить. Сохранить?`,
+        { reply_markup: keyboard }
+      );
+
+      // Таймаут 2 минуты — автоотмена
+      const timeout = setTimeout(async () => {
+        pendingSetlinks.delete(statusMsg.message_id);
+        try {
+          await ctx.api.deleteMessage(chatId, statusMsg.message_id);
+        } catch {}
+      }, 120_000);
+
+      pendingSetlinks.set(statusMsg.message_id, {
+        link,
+        chatId,
+        healthError: healthResult.error || "TURN не отвечает",
+        timeout,
+      });
     }
-    parts.push(vkStatus);
-
-    if (healthResult.error && healthResult.alive) {
-      parts.push(healthResult.error);
-    }
-
-    config.stats.lastCheckOk = healthResult.alive;
-    config.stats.lastCheckAt = new Date().toISOString();
-    config.stats.lastCheckDetails = healthResult.alive
-      ? `Ссылка проверена, ${healthResult.attempts} попыток`
-      : healthResult.error || "TURN не отвечает";
-    saveConfig(config);
-
-    await updateStatus(parts.join("\n"));
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     await updateStatus(`❌ Ошибка: ${msg}`);
@@ -773,6 +792,79 @@ bot.command("rmlink", async (ctx) => {
   await ctx.reply(
     `✅ Ссылка #${num} удалена.\n${removed}\n\nОсталось в очереди: ${config.linkQueue.length}`
   );
+});
+
+// Callback: подтверждение /setlink для мёртвой ссылки
+bot.callbackQuery(/^setlink:yes:/, async (ctx) => {
+  const msgId = Number(ctx.callbackQuery.data!.split(":")[2]);
+  const pending = pendingSetlinks.get(msgId);
+
+  if (!pending) {
+    await ctx.answerCallbackQuery({ text: "Запрос устарел" });
+    return;
+  }
+
+  clearTimeout(pending.timeout);
+  pendingSetlinks.delete(msgId);
+
+  if (isApplying) {
+    await ctx.answerCallbackQuery({ text: "⏳ Уже применяю ссылку, подожди" });
+    return;
+  }
+
+  isApplying = true;
+  await ctx.answerCallbackQuery();
+
+  try {
+    const config = loadConfig();
+    config.vkCallLink = pending.link;
+    config.updatedAt = new Date().toISOString();
+    config.stats.lastCheckOk = false;
+    config.stats.lastCheckAt = new Date().toISOString();
+    config.stats.lastCheckDetails = pending.healthError;
+    saveConfig(config);
+
+    const vkResult = await publishToVk(pending.link);
+    let vkStatus = "";
+    if (vkResult.ok) {
+      vkStatus = "\nVK обновлён";
+    } else if (!isVkConfigured) {
+      vkStatus = "\nVK relay не настроен";
+    } else {
+      vkStatus = `\nVK: ${vkResult.error}`;
+    }
+
+    await ctx.api.editMessageText(
+      pending.chatId,
+      msgId,
+      `⚠️ Ссылка сохранена, но соединение невозможно установить.${vkStatus}`
+    );
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    try {
+      await ctx.api.editMessageText(pending.chatId, msgId, `❌ Ошибка: ${msg}`);
+    } catch {}
+  } finally {
+    isApplying = false;
+  }
+});
+
+bot.callbackQuery(/^setlink:no:/, async (ctx) => {
+  const msgId = Number(ctx.callbackQuery.data!.split(":")[2]);
+  const pending = pendingSetlinks.get(msgId);
+
+  if (!pending) {
+    await ctx.answerCallbackQuery({ text: "Запрос устарел" });
+    return;
+  }
+
+  clearTimeout(pending.timeout);
+  pendingSetlinks.delete(msgId);
+  await ctx.answerCallbackQuery();
+
+  try {
+    await ctx.api.deleteMessage(pending.chatId, msgId);
+  } catch {}
 });
 
 // Обработка текстовых сообщений — добавление в очередь
