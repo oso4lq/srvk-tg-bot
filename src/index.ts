@@ -39,7 +39,10 @@ interface TurnConfig {
 }
 
 const BOT_TOKEN = process.env.BOT_TOKEN!;
-const ADMIN_CHAT_ID = Number(process.env.ADMIN_CHAT_ID!);
+const ADMIN_CHAT_IDS = (process.env.ADMIN_CHAT_ID || "")
+  .split(",")
+  .map((s) => Number(s.trim()))
+  .filter((n) => !isNaN(n) && n !== 0);
 const CONFIG_PATH = process.env.CONFIG_PATH || "/etc/vk-turn-proxy/config.json";
 const SYSTEMD_SERVICE = process.env.SYSTEMD_SERVICE || "vk-turn-proxy";
 const VK_TURN_CLIENT_PATH = process.env.VK_TURN_CLIENT_PATH || "/usr/local/bin/vk-turn-client";
@@ -452,7 +455,18 @@ async function getServiceTrafficBytes(): Promise<number> {
 // ─── Гарда: только админ ────────────────────────────────────
 
 function isAdmin(ctx: Context): boolean {
-  return ctx.from?.id === ADMIN_CHAT_ID;
+  return ctx.from?.id !== undefined && ADMIN_CHAT_IDS.includes(ctx.from.id);
+}
+
+/** Отправляет сообщение всем админам */
+async function notifyAdmins(text: string, extra?: object): Promise<void> {
+  for (const chatId of ADMIN_CHAT_IDS) {
+    try {
+      await bot.api.sendMessage(chatId, text, extra);
+    } catch (error) {
+      console.error(`Не удалось отправить сообщение ${chatId}:`, error);
+    }
+  }
 }
 
 // ─── Инициализация бота ─────────────────────────────────────
@@ -666,15 +680,10 @@ async function runHealthCheck(): Promise<void> {
 
   // Алерт только если TURN упал
   if (!result.alive) {
-    try {
-      await bot.api.sendMessage(
-        ADMIN_CHAT_ID,
-        `🚨 TURN не отвечает!\n\n${result.details}\n\n` +
-          `Отправь новую ссылку VK-звонка`
-      );
-    } catch (error) {
-      console.error("Не удалось отправить алерт:", error);
-    }
+    await notifyAdmins(
+      `🚨 TURN не отвечает!\n\n${result.details}\n\n` +
+        `Отправь новую ссылку VK-звонка`
+    );
   }
 }
 
@@ -757,14 +766,7 @@ async function sendDailyReport(): Promise<void> {
     }
   }
 
-  try {
-    await bot.api.sendMessage(
-      ADMIN_CHAT_ID,
-      lines.filter((l) => l !== null).join("\n")
-    );
-  } catch (error) {
-    console.error("Не удалось отправить ежедневный отчёт:", error);
-  }
+  await notifyAdmins(lines.filter((l) => l !== null).join("\n"));
 
   // Сброс дневной статистики
   config.dailyStats = {
@@ -833,13 +835,10 @@ async function main(): Promise<void> {
       const startConfig = loadConfig();
       const monitorState = startConfig.monitoringEnabled ? "✅" : "⏸ выключен";
       const vkState = isVkConfigured ? "✅" : "выключена";
-      bot.api
-        .sendMessage(
-          ADMIN_CHAT_ID,
-          `🟢 VK TURN Monitor запущен\n\nМониторинг: ${monitorState}\nПубликация в VK: ${vkState}\n\nДля обновления ссылки отправь её в чат`,
-          { reply_markup: mainKeyboard }
-        )
-        .catch(() => {});
+      notifyAdmins(
+        `🟢 VK TURN Monitor запущен\n\nМониторинг: ${monitorState}\nПубликация в VK: ${vkState}\n\nДля обновления ссылки отправь её в чат`,
+        { reply_markup: mainKeyboard }
+      ).catch(() => {});
     },
   });
 }
