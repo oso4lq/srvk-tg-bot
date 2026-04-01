@@ -718,12 +718,31 @@ async function handleMonitor(ctx: Context): Promise<void> {
 bot.command("monitor", handleMonitor);
 bot.hears("Мониторинг", handleMonitor);
 
-// Обработка текстовых сообщений — автоприменение VK-ссылки
+// Обработка текстовых сообщений — добавление в очередь
 bot.on("message:text", async (ctx) => {
   const text = ctx.message.text.trim();
 
-  if (/^https:\/\/vk\.(com|ru)\/call\/join\//.test(text)) {
-    await applyLink(text, ctx);
+  if (VK_CALL_REGEX.test(text)) {
+    // Добавляем в очередь, не активируем
+    const config = loadConfig();
+
+    if (text === config.vkCallLink) {
+      await ctx.reply("ℹ️ Эта ссылка уже активна.");
+      return;
+    }
+
+    if (config.linkQueue.includes(text)) {
+      await ctx.reply("ℹ️ Эта ссылка уже в очереди.");
+      return;
+    }
+
+    config.linkQueue.push(text);
+    saveConfig(config);
+
+    await ctx.reply(
+      `✅ Ссылка добавлена в очередь (позиция ${config.linkQueue.length}).\n` +
+        `Всего ссылок в очереди: ${config.linkQueue.length}`
+    );
     return;
   }
 
