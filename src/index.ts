@@ -24,6 +24,7 @@ interface TurnConfig {
     totalRestarts: number;
     lastCheckOk: boolean;
     lastCheckAt: string;
+    lastCheckDetails: string;
     uptimeSince: string;
   };
 }
@@ -33,6 +34,7 @@ const ADMIN_CHAT_ID = Number(process.env.ADMIN_CHAT_ID!);
 const CONFIG_PATH = process.env.CONFIG_PATH || "/etc/vk-turn-proxy/config.json";
 const SYSTEMD_SERVICE = process.env.SYSTEMD_SERVICE || "vk-turn-proxy";
 const VK_TURN_CLIENT_PATH = process.env.VK_TURN_CLIENT_PATH || "/usr/local/bin/vk-turn-client";
+const VPS_PUBLIC_IP = process.env.VPS_PUBLIC_IP || "";
 const CHECK_INTERVAL_MS = (Number(process.env.CHECK_INTERVAL_MIN) || 5) * 60 * 1000;
 
 // ─── Работа с конфигом ──────────────────────────────────────
@@ -49,7 +51,8 @@ function loadConfig(): TurnConfig {
         totalRestarts: 0,
         lastCheckOk: false,
         lastCheckAt: "",
-        uptimeSince: "",
+        lastCheckDetails: "",
+        uptimeSince: new Date().toISOString(),
       },
     };
     saveConfig(defaultConfig);
@@ -111,25 +114,50 @@ async function checkTurnHealth(): Promise<{
       };
     }
 
-    // Проверка 3: пробуем подключиться клиентом с коротким таймаутом
-    // Клиент пытается установить TURN-сессию и выходит
-    try {
-      await execAsync(
-        `timeout 15 ${VK_TURN_CLIENT_PATH} ` +
-          `-link "${config.vkCallLink}" ` +
-          `-peer ${config.wgPeerAddress}:${config.turnListenPort} ` +
-          `-listen 127.0.0.1:0 ` + // Случайный порт, просто проверка
-          `-n 1 2>&1 | head -5`,
-        { timeout: 20_000 }
-      );
-    } catch {
-      // Таймаут — нормально, значит клиент подключился и мы его убили.
-      // Если бы ссылка была мертва, он бы вернул ошибку раньше 15 сек.
+    // Проверка 3: пробуем подключиться клиентом с коротким таймаутом.
+    // Если ссылка мёртвая — клиент падает с ошибкой до таймаута.
+    // Если ссылка живая — клиент работает, и timeout его убивает (код 124).
+    if (existsSync(VK_TURN_CLIENT_PATH) && VPS_PUBLIC_IP) {
+      try {
+        await execAsync(
+          `timeout 10 ${VK_TURN_CLIENT_PATH} ` +
+            `-vk-link "${config.vkCallLink}" ` +
+            `-peer ${VPS_PUBLIC_IP}:${config.turnListenPort} ` +
+            `-listen 127.0.0.1:0 ` +
+            `-n 1 2>&1`,
+          { timeout: 15_000 }
+        );
+        // Клиент завершился с кодом 0 до таймаута — ОК
+      } catch (error: any) {
+        // Код 124 = timeout убил процесс → клиент работал → ссылка жива
+        if (error.code === 124 || error.killed) {
+          // Нормально: клиент работал до таймаута
+        } else {
+          // Клиент вернул ошибку до таймаута → ссылка не работает
+          const output = (error.stdout || error.stderr || "").trim();
+          const reason =
+            output.split("\n").slice(0, 3).join("\n") || error.message;
+          return {
+            alive: false,
+            details: `Сервис активен, но ссылка не работает:\n${reason}`,
+          };
+        }
+      }
+    }
+
+    if (!existsSync(VK_TURN_CLIENT_PATH) || !VPS_PUBLIC_IP) {
+      const reason = !existsSync(VK_TURN_CLIENT_PATH)
+        ? "нет клиента"
+        : "не задан VPS_PUBLIC_IP";
+      return {
+        alive: true,
+        details: `Сервис активен, ${connCount} UDP (ссылка не проверена — ${reason})`,
+      };
     }
 
     return {
       alive: true,
-      details: `Сервис активен, ${connCount} UDP-соединений`,
+      details: `Всё ОК: сервис активен, ${connCount} UDP, ссылка работает`,
     };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
@@ -142,10 +170,10 @@ async function checkTurnHealth(): Promise<{
 /** Извлекает данные из ссылки VK-звонка и обновляет конфиг */
 async function updateCallLink(newLink: string): Promise<string> {
   // Валидация формата ссылки
-  const vkCallRegex = /^https:\/\/vk\.com\/call\/join\/[A-Za-z0-9_/-]+$/;
+  const vkCallRegex = /^https:\/\/vk\.(com|ru)\/call\/join\/[A-Za-z0-9_/-]+$/;
   if (!vkCallRegex.test(newLink)) {
     throw new Error(
-      "Неверный формат ссылки. Ожидается: https://vk.com/call/join/..."
+      "Неверный формат ссылки. Ожидается: https://vk.com/call/join/... или https://vk.ru/call/join/..."
     );
   }
 
@@ -265,6 +293,7 @@ bot.command("status", async (ctx) => {
 
   config.stats.lastCheckOk = result.alive;
   config.stats.lastCheckAt = new Date().toISOString();
+  config.stats.lastCheckDetails = result.details;
   saveConfig(config);
 
   const icon = result.alive ? "✅" : "❌";
@@ -315,25 +344,48 @@ bot.command("stats", async (ctx) => {
   const config = loadConfig();
   const s = config.stats;
 
-  let serviceInfo = "неизвестно";
+  // Получаем информацию о сервисе из systemd
+  let serviceState = "неизвестно";
+  let serviceUptime = "";
   try {
     const { stdout } = await execAsync(
-      `systemctl show ${SYSTEMD_SERVICE} --property=ActiveState,MemoryCurrent 2>/dev/null`
+      `systemctl show ${SYSTEMD_SERVICE} --property=ActiveState,ActiveEnterTimestamp,MemoryCurrent 2>/dev/null`
     );
-    serviceInfo = stdout.trim().replace(/\n/g, ", ");
+    const props: Record<string, string> = {};
+    for (const line of stdout.trim().split("\n")) {
+      const idx = line.indexOf("=");
+      if (idx > 0) props[line.slice(0, idx)] = line.slice(idx + 1);
+    }
+    serviceState = props.ActiveState || "неизвестно";
+    if (props.ActiveEnterTimestamp && serviceState === "active") {
+      serviceUptime = formatUptime(
+        new Date(props.ActiveEnterTimestamp).toISOString()
+      );
+    }
+    const mem = parseInt(props.MemoryCurrent || "0", 10);
+    if (mem > 0) {
+      serviceState += `, ${(mem / 1024 / 1024).toFixed(1)} МБ`;
+    }
   } catch {
     // Сервис может быть не установлен на этапе разработки
   }
 
-  await ctx.reply(
-    `📊 Статистика VK TURN Proxy\n\n` +
-      `Аптайм: ${formatUptime(s.uptimeSince)}\n` +
-      `Перезапусков: ${s.totalRestarts}\n` +
-      `Последняя проверка: ${s.lastCheckAt ? new Date(s.lastCheckAt).toLocaleString("ru") : "—"}\n` +
-      `Результат: ${s.lastCheckOk ? "✅ OK" : "❌ Fail"}\n` +
-      `Сервис: ${serviceInfo}\n` +
-      `Ссылка обновлена: ${config.updatedAt ? new Date(config.updatedAt).toLocaleString("ru") : "—"}`
-  );
+  const lines = [
+    `📊 Статистика VK TURN Proxy`,
+    ``,
+    `Сервис: ${serviceState}`,
+    serviceUptime ? `Аптайм сервиса: ${serviceUptime}` : null,
+    `Аптайм бота: ${formatUptime(s.uptimeSince)}`,
+    `Перезапусков: ${s.totalRestarts}`,
+    ``,
+    `Последняя проверка: ${s.lastCheckAt ? new Date(s.lastCheckAt).toLocaleString("ru") : "—"}`,
+    `Результат: ${s.lastCheckOk ? "✅ OK" : "❌ Fail"}`,
+    s.lastCheckDetails ? `Детали: ${s.lastCheckDetails}` : null,
+    ``,
+    `Ссылка обновлена: ${config.updatedAt ? new Date(config.updatedAt).toLocaleString("ru") : "—"}`,
+  ];
+
+  await ctx.reply(lines.filter((l) => l !== null).join("\n"));
 });
 
 // /config — текущая конфигурация (без секретов)
@@ -358,7 +410,7 @@ bot.command("config", async (ctx) => {
 bot.on("message:text", async (ctx) => {
   const text = ctx.message.text;
 
-  if (text.startsWith("https://vk.com/call/join/")) {
+  if (/^https:\/\/vk\.(com|ru)\/call\/join\//.test(text)) {
     await ctx.reply(
       `Похоже на ссылку VK-звонка. Применить?\n\n/setlink ${text}`
     );
@@ -382,6 +434,7 @@ async function runHealthCheck(): Promise<void> {
 
   config.stats.lastCheckOk = result.alive;
   config.stats.lastCheckAt = new Date().toISOString();
+  config.stats.lastCheckDetails = result.details;
   saveConfig(config);
 
   // Алерт только если TURN упал
@@ -415,8 +468,10 @@ function startMonitor(): void {
 async function main(): Promise<void> {
   console.log("VK TURN Proxy Monitor запускается...");
 
-  // Инициализируем конфиг, если его нет
-  loadConfig();
+  // Инициализируем конфиг и обновляем время старта бота
+  const config = loadConfig();
+  config.stats.uptimeSince = new Date().toISOString();
+  saveConfig(config);
 
   // Запускаем фоновый мониторинг
   startMonitor();
