@@ -1,0 +1,53 @@
+# Токен Telegram-бота (получить у @BotFather)
+BOT_TOKEN=your_bot_token_here
+
+# Telegram chat ID админов через запятую (получить у @userinfobot)
+ADMIN_CHAT_ID=123456789,987654321
+
+# Путь к бинарнику vk-turn-client (для проверки ссылки)
+VK_TURN_CLIENT_PATH=/usr/local/bin/vk-turn-client
+
+# Путь к бинарнику vk-turn-server
+VK_TURN_SERVER_PATH=/usr/local/bin/vk-turn-server
+
+# Путь к конфиг-файлу с текущей ссылкой и параметрами
+CONFIG_PATH=/etc/vk-turn-proxy/config.json
+
+# Имя systemd-сервиса vk-turn-proxy
+SYSTEMD_SERVICE=vk-turn-proxy
+
+# IP и порт WireGuard-сервера на этом VPS
+WG_PEER_IP=127.0.0.1
+WG_PEER_PORT=51820
+
+# Порт, на котором слушает vk-turn-proxy сервер
+VK_TURN_LISTEN_PORT=56000
+
+# Публичный IP VPS (нужен для проверки ссылки через loopback-тест)
+VPS_PUBLIC_IP=
+
+# Интервал проверки TURN (в минутах)
+CHECK_INTERVAL_MIN=5
+
+# VK API для публикации ссылки (опционально)
+# Закрытая группа, куда бот публикует ссылку для роутера
+VK_GROUP_TOKEN=
+VK_GROUP_ID=
+
+# ─── Yandex Mail (опционально) ──────────────────────────────
+# Мониторинг почтового ящика Yandex для получения VK call ссылок.
+# Если не заданы YANDEX_MAIL_USER и YANDEX_MAIL_PASSWORD — модуль отключён.
+
+# Логин Yandex-почты
+YANDEX_MAIL_USER=
+
+# Пароль приложения (НЕ основной пароль!)
+# Создать: Яндекс ID → Безопасность → Пароли приложений → Почта
+YANDEX_MAIL_PASSWORD=
+
+# Интервал проверки почты в секундах (по умолчанию 60)
+YANDEX_MAIL_CHECK_INTERVAL=60
+
+# Фильтр по отправителю — принимать ссылки только от этих адресов.
+# Несколько адресов через запятую. Пусто = принимать от всех.
+YANDEX_MAIL_FROM_FILTER=example@yandex.ru
