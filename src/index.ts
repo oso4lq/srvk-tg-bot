@@ -66,6 +66,13 @@ const pendingSetlinks = new Map<number, {
   timeout: ReturnType<typeof setTimeout>;
 }>();
 
+/** Данные отчётов для пагинации инцидентов (ключ — "chatId:msgId") */
+const pendingReports = new Map<string, {
+  header: string;
+  incidents: string[];
+  timeout: ReturnType<typeof setTimeout>;
+}>();
+
 // ─── Работа с конфигом ──────────────────────────────────────
 
 const DEFAULT_DAILY_STATS = (): TurnConfig["dailyStats"] => ({
@@ -528,6 +535,46 @@ function formatUptime(since: string): string {
   return `${hours}ч ${minutes}м`;
 }
 
+function formatTimeAgo(isoDate: string): string {
+  if (!isoDate) return "—";
+  const diff = Date.now() - new Date(isoDate).getTime();
+  const minutes = Math.floor(diff / 60_000);
+  if (minutes < 1) return "только что";
+  if (minutes < 60) return `${minutes} мин назад`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}ч ${minutes % 60}м назад`;
+  const days = Math.floor(hours / 24);
+  return `${days}д ${hours % 24}ч назад`;
+}
+
+function buildReportPage(
+  header: string,
+  incidents: string[],
+  page: number
+): { text: string; keyboard?: InlineKeyboard } {
+  const pageSize = 10;
+  const totalPages = Math.ceil(incidents.length / pageSize);
+  const start = page * pageSize;
+  const shown = incidents.slice(start, start + pageSize);
+
+  let text = header;
+  if (shown.length > 0) {
+    text += "\n" + shown.map((i) => `  • ${i}`).join("\n");
+  }
+  if (totalPages > 1) {
+    text += `\n\n📄 ${page + 1} / ${totalPages}`;
+  }
+
+  let keyboard: InlineKeyboard | undefined;
+  if (totalPages > 1) {
+    keyboard = new InlineKeyboard();
+    if (page > 0) keyboard.text("◀️", `rpt:${page - 1}`);
+    if (page < totalPages - 1) keyboard.text("▶️", `rpt:${page + 1}`);
+  }
+
+  return { text, keyboard };
+}
+
 function formatBytes(bytes: number): string {
   if (bytes <= 0) return "0 Б";
   const units = ["Б", "КБ", "МБ", "ГБ", "ТБ"];
@@ -717,17 +764,16 @@ bot.hears("Статистика", handleStats);
 async function handleConfig(ctx: Context): Promise<void> {
   const config = loadConfig();
 
-  // Маскируем ссылку — показываем только начало
-  const maskedLink = config.vkCallLink
-    ? config.vkCallLink.slice(0, 35) + "..."
-    : "не задана";
+  const link = config.vkCallLink || "не задана";
+  const lastCheck = formatTimeAgo(config.stats.lastCheckAt);
 
   await ctx.reply(
     `⚙️ Конфигурация\n\n` +
-      `VK-звонок: ${maskedLink}\n` +
+      `VK-звонок: ${link}\n` +
       `WG peer: ${config.wgPeerAddress}:${config.wgPeerPort}\n` +
       `TURN порт: ${config.turnListenPort}\n` +
-      `Интервал проверки: 5–10 мин (рандом)`
+      `Интервал проверки: 5–10 мин (рандом)\n` +
+      `Последняя проверка: ${lastCheck}`
   );
 }
 bot.command("config", handleConfig);
@@ -869,6 +915,30 @@ bot.callbackQuery(/^setlink:no:/, async (ctx) => {
   try {
     await ctx.api.deleteMessage(pending.chatId, msgId);
   } catch {}
+});
+
+// Callback: пагинация инцидентов в ежедневном отчёте
+bot.callbackQuery(/^rpt:\d+$/, async (ctx) => {
+  const page = Number(ctx.callbackQuery.data!.split(":")[1]);
+  const chatId = ctx.callbackQuery.message?.chat.id;
+  const msgId = ctx.callbackQuery.message?.message_id;
+
+  if (!chatId || !msgId) {
+    await ctx.answerCallbackQuery({ text: "Ошибка" });
+    return;
+  }
+
+  const key = `${chatId}:${msgId}`;
+  const report = pendingReports.get(key);
+
+  if (!report) {
+    await ctx.answerCallbackQuery({ text: "Отчёт устарел" });
+    return;
+  }
+
+  const { text, keyboard } = buildReportPage(report.header, report.incidents, page);
+  await ctx.answerCallbackQuery();
+  await ctx.api.editMessageText(chatId, msgId, text, keyboard ? { reply_markup: keyboard } : undefined);
 });
 
 // Обработка текстовых сообщений — добавление в очередь
@@ -1020,8 +1090,8 @@ async function sendDailyReport(): Promise<void> {
     ? formatBytes(deltaBytes)
     : "н/д (нужен /restart для включения IPAccounting)";
 
-  // Сборка отчёта
-  const lines = [
+  // Сборка отчёта — заголовок (без инцидентов)
+  const headerLines = [
     `📋 Ежедневный отчёт VK TURN Proxy`,
     ``,
     `Статус: ${health.alive ? "✅ OK" : "❌ Fail"}`,
@@ -1034,16 +1104,30 @@ async function sendDailyReport(): Promise<void> {
     ``,
     `Происшествия: ${ds.failedChecks === 0 ? "нет ✅" : `${ds.failedChecks} ⚠️`}`,
   ];
+  const header = headerLines.filter((l) => l !== null).join("\n");
 
-  if (ds.incidents.length > 0) {
-    const shown = ds.incidents.slice(-10);
-    lines.push(...shown.map((i) => `  • ${i}`));
-    if (ds.incidents.length > 10) {
-      lines.push(`  ... и ещё ${ds.incidents.length - 10}`);
+  // Отправка с пагинацией инцидентов
+  const { text, keyboard } = buildReportPage(header, ds.incidents, 0);
+  for (const chatId of ADMIN_CHAT_IDS) {
+    try {
+      const msg = await bot.api.sendMessage(
+        chatId,
+        text,
+        keyboard ? { reply_markup: keyboard } : undefined
+      );
+      if (ds.incidents.length > 10) {
+        const key = `${chatId}:${msg.message_id}`;
+        const timeout = setTimeout(() => pendingReports.delete(key), 24 * 60 * 60_000);
+        pendingReports.set(key, {
+          header,
+          incidents: [...ds.incidents],
+          timeout,
+        });
+      }
+    } catch (error) {
+      console.error(`Не удалось отправить отчёт ${chatId}:`, error);
     }
   }
-
-  await notifyAdmins(lines.filter((l) => l !== null).join("\n"));
 
   // Сброс дневной статистики
   config.dailyStats = {

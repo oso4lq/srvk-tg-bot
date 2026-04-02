@@ -12,6 +12,7 @@ dist/
 # Claude Code
 .claude/
 CLAUDE.md
+docs/superpowers/
 
 # AI docs
 .ai/
