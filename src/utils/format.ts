@@ -1,3 +1,5 @@
+// src/utils/format.ts
+
 import { InlineKeyboard } from "grammy";
 
 // ─── Форматирование ─────────────────────────────────────────

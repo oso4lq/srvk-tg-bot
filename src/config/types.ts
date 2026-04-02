@@ -1,3 +1,5 @@
+// src/config/types.ts
+
 // ─── Типы конфигурации ──────────────────────────────────────
 
 export interface TurnConfig {

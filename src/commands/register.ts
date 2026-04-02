@@ -1,3 +1,5 @@
+// src/commands/register.ts
+
 import { Bot } from "grammy";
 import { isAdmin } from "../utils/notify";
 import { mainKeyboard } from "../bot";

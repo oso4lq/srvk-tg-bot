@@ -1,3 +1,5 @@
+// src/links/fallback.ts
+
 import { loadConfig, saveConfig } from "../config/config";
 import { checkLinkHealth } from "../health/check-link";
 import { publishToVk } from "./vk-api";
