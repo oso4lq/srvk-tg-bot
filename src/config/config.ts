@@ -1,3 +1,5 @@
+// src/config/config.ts
+
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { TurnConfig, DEFAULT_DAILY_STATS } from "./types";
 

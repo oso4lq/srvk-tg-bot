@@ -1,3 +1,5 @@
+// src/links/vk-api.ts
+
 // ─── VK API ─────────────────────────────────────────────────
 
 export const VK_GROUP_TOKEN = process.env.VK_GROUP_TOKEN || "";

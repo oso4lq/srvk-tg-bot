@@ -1,3 +1,5 @@
+// src/index.ts
+
 import "dotenv/config";
 import { bot } from "./bot";
 import { mainKeyboard } from "./bot";

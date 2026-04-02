@@ -1,3 +1,5 @@
+// src/monitoring/daily-report.ts
+
 import { exec } from "child_process";
 import { promisify } from "util";
 import { bot } from "../bot";
