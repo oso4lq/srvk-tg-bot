@@ -90,9 +90,14 @@ if [ -f "$PID_FILE" ]; then
     rm -f "$PID_FILE"
 fi
 
-# Запускаем с новой ссылкой
+# Запускаем с новой ссылкой (с правильными флагами клиента)
 if [ -x "$VK_TURN_CLIENT" ]; then
-    $VK_TURN_CLIENT "$NEW_LINK" >> "$LOG_FILE" 2>&1 &
+    $VK_TURN_CLIENT \
+        -vk-link "$NEW_LINK" \
+        -peer "$VK_TURN_PEER" \
+        -listen "$VK_TURN_LISTEN" \
+        -n "$VK_TURN_CHANNELS" \
+        >> "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
     log "INFO" "vk-turn-client запущен (PID: $!) с новой ссылкой"
 else

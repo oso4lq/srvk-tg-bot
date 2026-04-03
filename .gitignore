@@ -34,3 +34,7 @@ npm-debug.log*
 
 # Lock file (npm, using pnpm)
 package-lock.json
+
+# router
+router/client-aarch64
+router/config.sh
