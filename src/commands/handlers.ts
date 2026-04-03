@@ -10,6 +10,7 @@ import { applyLink, VK_CALL_REGEX, isApplying } from "../links/apply";
 import { tryFallbackFromQueue } from "../links/fallback";
 import { restartService } from "../service/restart";
 import { formatUptime, formatTimeAgo, parseSystemdProps } from "../utils/format";
+import { hasPendingCaptcha, submitCaptchaAnswer } from "../creds/captcha";
 
 const execAsync = promisify(exec);
 
@@ -211,6 +212,13 @@ export async function handleText(ctx: Filter<Context, "message:text">): Promise<
       // Нет активной ссылки — сразу активируем из очереди
       await tryFallbackFromQueue();
     }
+    return;
+  }
+
+  // Капча — если ожидает ответ, любой не-URL текст считается ответом
+  if (hasPendingCaptcha()) {
+    submitCaptchaAnswer(text);
+    await ctx.reply("✅ Капча отправлена, жду ответ VK...");
     return;
   }
 

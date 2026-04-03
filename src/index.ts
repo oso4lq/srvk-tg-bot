@@ -12,6 +12,7 @@ import { tryFallbackFromQueue } from "./links/fallback";
 import { isVkConfigured, VK_GROUP_TOKEN, VK_GROUP_ID } from "./links/vk-api";
 import { notifyAdmins } from "./utils/notify";
 import { getServiceTrafficBytes } from "./utils/systemd";
+import { startCredsServer, stopCredsServer } from "./creds/creds-server";
 
 // ─── Регистрация команд ─────────────────────────────────────
 
@@ -37,6 +38,9 @@ async function main(): Promise<void> {
       console.log("VK relay не настроен — публикация ссылок в VK отключена");
     }
   }
+
+  // Запускаем HTTP-сервер для выдачи TURN credentials клиенту
+  startCredsServer();
 
   // Запускаем фоновый мониторинг
   startMonitor();
@@ -85,12 +89,14 @@ async function main(): Promise<void> {
 // Graceful shutdown
 process.on("SIGINT", () => {
   console.log("Остановка...");
+  stopCredsServer();
   stopMonitor();
   bot.stop();
   process.exit(0);
 });
 
 process.on("SIGTERM", () => {
+  stopCredsServer();
   stopMonitor();
   bot.stop();
   process.exit(0);
