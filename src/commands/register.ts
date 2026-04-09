@@ -19,6 +19,7 @@ import {
   handleReportPage,
 } from "./callbacks";
 import { applyLink } from "../links/apply";
+import { submitCaptchaAnswer } from "../creds/captcha";
 
 // ─── Регистрация команд ─────────────────────────────────────
 
@@ -82,6 +83,12 @@ export function registerCommands(bot: Bot): void {
   bot.callbackQuery(/^setlink:yes:/, handleSetlinkYes);
   bot.callbackQuery(/^setlink:no:/, handleSetlinkNo);
   bot.callbackQuery(/^rpt:\d+$/, handleReportPage);
+  bot.callbackQuery("captcha:done", async (ctx) => {
+    const submitted = submitCaptchaAnswer("");
+    await ctx.answerCallbackQuery(
+      submitted ? "Ретраю запрос к VK..." : "Нет ожидающей капчи",
+    );
+  });
 
   // Текстовые сообщения (должен быть последним)
   bot.on("message:text", handleText);

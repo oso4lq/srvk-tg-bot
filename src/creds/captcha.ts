@@ -1,12 +1,12 @@
 // src/creds/captcha.ts
 
-import { InputFile } from "grammy";
+import { InlineKeyboard } from "grammy";
 import { bot } from "../bot";
 import { ADMIN_CHAT_IDS } from "../utils/notify";
 
 // ─── Обработка капчи через Telegram ─────────────────────────
 
-const CAPTCHA_TIMEOUT_MS = 120_000; // 2 минуты
+const CAPTCHA_TIMEOUT_MS = 180_000; // 3 минуты (интерактивная капча)
 
 interface PendingCaptcha {
   resolve: (key: string) => void;
@@ -22,13 +22,13 @@ export function hasPendingCaptcha(): boolean {
 }
 
 /**
- * Отправляет капчу админам в Telegram и ждёт текстовый ответ.
- * Возвращает введённый текст капчи.
- * Бросает ошибку при таймауте (2 мин).
+ * Отправляет ссылку на капчу админам и ждёт подтверждение.
+ * Для интерактивной капчи VK (redirect_uri) — пользователь решает в браузере
+ * и нажимает «Готово». Возвращает пустую строку при подтверждении.
+ * Бросает ошибку при таймауте (3 мин).
  */
 export async function requestCaptchaSolution(
-  captchaImg: string,
-  _captchaSid: string,
+  redirectUri: string,
 ): Promise<string> {
   // Если есть предыдущая — отменяем
   if (pending) {
@@ -42,22 +42,22 @@ export async function requestCaptchaSolution(
       pending = null;
       for (const chatId of ADMIN_CHAT_IDS) {
         bot.api
-          .sendMessage(chatId, "⏰ Таймаут капчи (2 мин). Credentials не получены.")
+          .sendMessage(chatId, "⏰ Таймаут капчи (3 мин). Credentials не получены.")
           .catch(() => {});
       }
-      reject(new Error("Таймаут ввода капчи (2 мин)"));
+      reject(new Error("Таймаут капчи (3 мин)"));
     }, CAPTCHA_TIMEOUT_MS);
 
     pending = { resolve, reject, timeout };
 
-    // Отправляем картинку капчи админам
-    sendCaptchaToAdmins(captchaImg).catch((err) => {
+    // Отправляем ссылку на капчу и кнопку «Готово»
+    sendCaptchaToAdmins(redirectUri).catch((err) => {
       console.error("Ошибка отправки капчи:", err);
     });
   });
 }
 
-/** Принимает ответ на капчу. Возвращает true если была ожидающая капча. */
+/** Принимает подтверждение решения капчи. Возвращает true если была ожидающая капча. */
 export function submitCaptchaAnswer(answer: string): boolean {
   if (!pending) return false;
   clearTimeout(pending.timeout);
@@ -66,35 +66,22 @@ export function submitCaptchaAnswer(answer: string): boolean {
   return true;
 }
 
-// ─── Отправка картинки капчи ─────────────────────────────────
+// ─── Отправка ссылки на капчу ────────────────────────────────
 
-async function sendCaptchaToAdmins(captchaImg: string): Promise<void> {
-  const caption = "🔐 VK требует капчу для TURN credentials\nОтветь текстом с картинки (2 мин):";
+async function sendCaptchaToAdmins(redirectUri: string): Promise<void> {
+  const keyboard = new InlineKeyboard()
+    .url("Пройти капчу", redirectUri)
+    .text("Готово", "captcha:done");
 
-  try {
-    // Скачиваем картинку (VK может фильтровать по заголовкам)
-    const res = await fetch(captchaImg, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:144.0) Gecko/20100101 Firefox/144.0",
-      },
-    });
-    const buffer = Buffer.from(await res.arrayBuffer());
+  const text =
+    "🔐 VK требует капчу для TURN credentials\n\n" +
+    "Открой ссылку, реши капчу, затем нажми «Готово» (3 мин):";
 
-    for (const chatId of ADMIN_CHAT_IDS) {
-      try {
-        const inputFile = new InputFile(buffer, "captcha.png");
-        await bot.api.sendPhoto(chatId, inputFile, { caption });
-      } catch (err) {
-        console.error(`Ошибка отправки капчи в ${chatId}:`, err);
-      }
-    }
-  } catch {
-    // Не удалось скачать картинку — отправляем ссылку текстом
-    for (const chatId of ADMIN_CHAT_IDS) {
-      bot.api
-        .sendMessage(chatId, `${caption}\n\nСсылка на капчу: ${captchaImg}`)
-        .catch(() => {});
+  for (const chatId of ADMIN_CHAT_IDS) {
+    try {
+      await bot.api.sendMessage(chatId, text, { reply_markup: keyboard });
+    } catch (err) {
+      console.error(`Ошибка отправки капчи в ${chatId}:`, err);
     }
   }
 }

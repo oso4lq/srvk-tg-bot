@@ -17,6 +17,7 @@ interface VkApiError {
   error_msg: string;
   captcha_sid?: string;
   captcha_img?: string;
+  redirect_uri?: string;
 }
 
 // ─── Константы VK API ────────────────────────────────────────
@@ -187,11 +188,20 @@ async function getCallToken(linkToken: string, accessToken: string): Promise<str
 
     // Капча
     const err = resp?.error as VkApiError | undefined;
-    if (err?.error_code === 14 && err.captcha_sid && err.captcha_img) {
+    if (err?.error_code === 14 && err.captcha_sid) {
+      const captchaUrl = err.redirect_uri || err.captcha_img;
+      if (!captchaUrl) {
+        throw new Error(`Шаг 2: капча без URL (sid=${err.captcha_sid})`);
+      }
       console.log(`VK API требует капчу (попытка ${attempt + 1}/3)`);
       try {
-        captchaKey = await requestCaptchaSolution(err.captcha_img, err.captcha_sid);
+        captchaKey = await requestCaptchaSolution(captchaUrl);
         captchaSid = err.captcha_sid;
+        // Пустой ответ = интерактивная капча решена в браузере, ретраим без captcha-параметров
+        if (!captchaKey) {
+          captchaSid = undefined;
+          captchaKey = undefined;
+        }
         continue;
       } catch (captchaErr) {
         const msg = captchaErr instanceof Error ? captchaErr.message : String(captchaErr);
