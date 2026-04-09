@@ -9,6 +9,8 @@ export const CONFIG_PATH = process.env.CONFIG_PATH || "/etc/vk-turn-proxy/config
 export const SYSTEMD_SERVICE = process.env.SYSTEMD_SERVICE || "vk-turn-proxy";
 export const VK_TURN_CLIENT_PATH = process.env.VK_TURN_CLIENT_PATH || "/usr/local/bin/vk-turn-client";
 export const VPS_PUBLIC_IP = process.env.VPS_PUBLIC_IP || "";
+export const CREDS_SERVER_PORT = Number(process.env.CREDS_SERVER_PORT) || 3100;
+export const CREDS_URL = `http://127.0.0.1:${CREDS_SERVER_PORT}/creds`;
 
 // ─── Работа с конфигом ──────────────────────────────────────
 

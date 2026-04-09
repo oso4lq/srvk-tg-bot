@@ -7,6 +7,7 @@ import {
   SYSTEMD_SERVICE,
   VK_TURN_CLIENT_PATH,
   VPS_PUBLIC_IP,
+  CREDS_URL,
   loadConfig,
 } from "../config/config";
 
@@ -69,6 +70,7 @@ export async function checkTurnHealth(): Promise<{
             `-vk-link "${config.vkCallLink}" ` +
             `-peer ${VPS_PUBLIC_IP}:${config.turnListenPort} ` +
             `-listen 127.0.0.1:0 ` +
+            `-creds-url "${CREDS_URL}" ` +
             `-n 1 2>&1`,
           { timeout: 15_000 }
         );

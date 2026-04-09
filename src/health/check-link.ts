@@ -4,7 +4,7 @@ import { exec } from "child_process";
 import { existsSync } from "fs";
 import { promisify } from "util";
 import { TurnConfig } from "../config/types";
-import { VK_TURN_CLIENT_PATH, VPS_PUBLIC_IP } from "../config/config";
+import { VK_TURN_CLIENT_PATH, VPS_PUBLIC_IP, CREDS_URL } from "../config/config";
 
 const execAsync = promisify(exec);
 
@@ -32,6 +32,7 @@ export async function checkLinkHealth(
           `-vk-link "${link}" ` +
           `-peer ${config.wgPeerAddress}:${config.turnListenPort} ` +
           `-listen 127.0.0.1:0 ` +
+          `-creds-url "${CREDS_URL}" ` +
           `-n 1 2>&1`,
         { timeout: 20_000 }
       );
