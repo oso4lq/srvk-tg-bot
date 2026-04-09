@@ -5,6 +5,17 @@ import { bot } from "../bot";
 import { ADMIN_CHAT_IDS } from "../utils/notify";
 
 // ─── Обработка капчи через Telegram ─────────────────────────
+//
+// TODO: автоматическое решение через 2captcha.com
+// VK использует интерактивную капчу-калейдоскоп (свайпер с паззлом).
+// 2captcha поддерживает тип задачи VKCaptchaTask:
+//   POST https://api.2captcha.com/createTask
+//   { clientKey, task: { type: "VKCaptchaTask", redirectUri, userAgent, proxyType, proxyAddress, proxyPort } }
+//   → poll getTaskResult → solution.token
+// Требуется: CAPTCHA_API_KEY в .env, HTTP-прокси на VPS (tinyproxy).
+// Прокси обязателен — 2captcha решает капчу от имени IP VPS.
+// Решение занимает 5-7 сек, стоимость ~$3/1000.
+// При реализации: попробовать 2captcha → при ошибке fallback на ручной режим ниже.
 
 const CAPTCHA_TIMEOUT_MS = 180_000; // 3 минуты (интерактивная капча)
 
