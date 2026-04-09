@@ -20,6 +20,13 @@ interface VkApiError {
   redirect_uri?: string;
 }
 
+/** Сигнал: интерактивная капча решена, нужен перезапуск всей цепочки */
+class CaptchaSolvedError extends Error {
+  constructor() {
+    super("Капча решена, перезапуск цепочки");
+  }
+}
+
 // ─── Константы VK API ────────────────────────────────────────
 
 const VK_CLIENT_ID = "6287487";
@@ -60,7 +67,7 @@ export async function getCreds(linkToken: string): Promise<TurnCreds> {
   if (fetchPromise) return fetchPromise;
 
   // Новый запрос
-  fetchPromise = fetchCreds(linkToken)
+  fetchPromise = fetchCredsWithRetry(linkToken)
     .then((creds) => {
       cache = { creds, link: linkToken, expiresAt: Date.now() + CACHE_TTL_MS };
       fetchPromise = null;
@@ -93,7 +100,25 @@ async function vkPost(url: string, data: string): Promise<Record<string, any>> {
   return (await res.json()) as Record<string, any>;
 }
 
-// ─── 4-step цепочка получения credentials ────────────────────
+// ─── 4-step цепочка с перезапуском после капчи ───────────────
+
+/**
+ * Пробует получить credentials. Если VK потребовал интерактивную капчу
+ * и пользователь её решил — перезапускает всю цепочку с нуля
+ * (VK разблокирует IP для НОВЫХ запросов, а не для повторов).
+ */
+async function fetchCredsWithRetry(linkToken: string): Promise<TurnCreds> {
+  try {
+    return await fetchCreds(linkToken);
+  } catch (err) {
+    if (err instanceof CaptchaSolvedError) {
+      console.log("Капча решена, перезапускаю получение credentials...");
+      notifyAdmins("🔄 Капча решена, получаю credentials...").catch(() => {});
+      return fetchCreds(linkToken);
+    }
+    throw err;
+  }
+}
 
 async function fetchCreds(linkToken: string): Promise<TurnCreds> {
   // Шаг 1: Anonymous token (login.vk.ru)
@@ -163,57 +188,37 @@ async function fetchCreds(linkToken: string): Promise<TurnCreds> {
 // ─── Шаг 2 с обработкой капчи ───────────────────────────────
 
 async function getCallToken(linkToken: string, accessToken: string): Promise<string> {
-  let captchaSid: string | undefined;
-  let captchaKey: string | undefined;
+  const body =
+    `vk_join_link=https://vk.com/call/join/${linkToken}&name=123&access_token=${accessToken}`;
 
-  for (let attempt = 0; attempt < 3; attempt++) {
-    let body =
-      `vk_join_link=https://vk.com/call/join/${linkToken}&name=123&access_token=${accessToken}`;
-    if (captchaSid && captchaKey) {
-      body += `&captcha_sid=${captchaSid}&captcha_key=${encodeURIComponent(captchaKey)}`;
-    }
+  const resp = await vkPost(
+    `https://api.vk.ru/method/calls.getAnonymousToken?v=5.274&client_id=${VK_CLIENT_ID}`,
+    body,
+  );
 
-    const resp = await vkPost(
-      `https://api.vk.ru/method/calls.getAnonymousToken?v=5.274&client_id=${VK_CLIENT_ID}`,
-      body,
-    );
-
-    // Успех
-    if (resp?.response?.token) {
-      if (attempt > 0) {
-        notifyAdmins("✅ Капча принята, TURN credentials получены").catch(() => {});
-      }
-      return resp.response.token as string;
-    }
-
-    // Капча
-    const err = resp?.error as VkApiError | undefined;
-    if (err?.error_code === 14 && err.captcha_sid) {
-      const captchaUrl = err.redirect_uri || err.captcha_img;
-      if (!captchaUrl) {
-        throw new Error(`Шаг 2: капча без URL (sid=${err.captcha_sid})`);
-      }
-      console.log(`VK API требует капчу (попытка ${attempt + 1}/3)`);
-      try {
-        captchaKey = await requestCaptchaSolution(captchaUrl);
-        captchaSid = err.captcha_sid;
-        // Пустой ответ = интерактивная капча решена в браузере, ретраим без captcha-параметров
-        if (!captchaKey) {
-          captchaSid = undefined;
-          captchaKey = undefined;
-        }
-        continue;
-      } catch (captchaErr) {
-        const msg = captchaErr instanceof Error ? captchaErr.message : String(captchaErr);
-        throw new Error(`Капча: ${msg}`);
-      }
-    }
-
-    // Другая ошибка VK API
-    throw new Error(
-      `Шаг 2 (call token): ${err?.error_msg || JSON.stringify(resp).substring(0, 200)}`,
-    );
+  // Успех
+  if (resp?.response?.token) {
+    return resp.response.token as string;
   }
 
-  throw new Error("Капча не пройдена после 3 попыток");
+  // Капча
+  const err = resp?.error as VkApiError | undefined;
+  if (err?.error_code === 14 && err.captcha_sid) {
+    const captchaUrl = err.redirect_uri || err.captcha_img;
+    if (!captchaUrl) {
+      throw new Error(`Шаг 2: капча без URL (sid=${err.captcha_sid})`);
+    }
+    console.log("VK API требует капчу");
+
+    // Ждём решения от пользователя
+    await requestCaptchaSolution(captchaUrl);
+
+    // Интерактивная капча решена — перезапускаем всю цепочку
+    throw new CaptchaSolvedError();
+  }
+
+  // Другая ошибка VK API
+  throw new Error(
+    `Шаг 2 (call token): ${err?.error_msg || JSON.stringify(resp).substring(0, 200)}`,
+  );
 }
