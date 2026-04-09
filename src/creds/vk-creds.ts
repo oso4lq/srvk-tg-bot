@@ -112,8 +112,9 @@ async function fetchCredsWithRetry(linkToken: string): Promise<TurnCreds> {
     return await fetchCreds(linkToken);
   } catch (err) {
     if (err instanceof CaptchaSolvedError) {
-      console.log("Капча решена, перезапускаю получение credentials...");
-      notifyAdmins("🔄 Капча решена, получаю credentials...").catch(() => {});
+      notifyAdmins("🔄 Капча решена, получаю credentials (5 сек)...").catch(() => {});
+      // VK нужно время на разблокировку после интерактивной капчи
+      await new Promise((r) => setTimeout(r, 5000));
       return fetchCreds(linkToken);
     }
     throw err;
